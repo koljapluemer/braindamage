@@ -6,6 +6,7 @@ from braindamage.tradeup import (
     ContractLine,
     average_float,
     collection_probability,
+    cvar,
     next_rarity,
     output_float,
     rarity_rank,
@@ -109,3 +110,25 @@ class TestCollectionProbability:
     def test_zero_outputs_raises(self):
         with pytest.raises(ValueError):
             collection_probability(5, 0)
+
+
+class TestCvar:
+    def test_worst_single_outcome_dominates_tail(self):
+        # Worst outcome alone (10%) already exceeds the 5% alpha slice, so CVaR
+        # is just that outcome's profit, not blended with the next-worst one.
+        outcomes = [(-100.0, 0.10), (-10.0, 0.20), (50.0, 0.70)]
+        assert cvar(outcomes, alpha=0.05) == pytest.approx(-100.0)
+
+    def test_interpolates_across_the_alpha_cutoff(self):
+        # Worst outcome (-100) covers only 4% of the requested 5%; the
+        # remaining 1% comes from the next-worst (-10), proportionally.
+        outcomes = [(-100.0, 0.04), (-10.0, 0.20), (50.0, 0.76)]
+        expected = (-100.0 * 0.04 + -10.0 * 0.01) / 0.05
+        assert cvar(outcomes, alpha=0.05) == pytest.approx(expected)
+
+    def test_alpha_covers_entire_distribution(self):
+        outcomes = [(-20.0, 0.5), (20.0, 0.5)]
+        assert cvar(outcomes, alpha=1.0) == pytest.approx(0.0)
+
+    def test_no_probability_mass_returns_none(self):
+        assert cvar([], alpha=0.05) is None

@@ -156,6 +156,27 @@ class HourlyMarketAggregate(Base):
     market_item: Mapped["MarketItem"] = relationship()
 
 
+class FavoriteMonoTrade(Base):
+    """A starred mono-trade combo (collection x rarity tier x StatTrak/not).
+
+    Tracked by that combo's identity, not by a frozen skin/price snapshot — the
+    cheapest input for a combo can change as prices move, so the favorites page
+    re-derives the current cheapest contract for it fresh, the same way the mono
+    trades survey page does for every combo.
+    """
+
+    __tablename__ = "favorite_mono_trades"
+    __table_args__ = (UniqueConstraint("collection_id", "rarity_name", "stattrak"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    collection_id: Mapped[str] = mapped_column(ForeignKey("collections.id"), nullable=False)
+    rarity_name: Mapped[str] = mapped_column(String, nullable=False)
+    stattrak: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    collection: Mapped["Collection"] = relationship()
+
+
 class MarketItemExternalId(Base):
     """Crosswalk from a MarketItem to a source's own id for it.
 

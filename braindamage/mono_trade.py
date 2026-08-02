@@ -13,16 +13,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from . import tradeup
-from .models import MarketItem, Skin
+from .models import FavoriteMonoTrade, MarketItem, Skin
 from .pricing import latest_prices
 
 
 @dataclass
 class MonoTradeCandidate:
+    collection_id: str
     collection_name: str
     rarity_name: str
     stattrak: bool
@@ -30,6 +31,10 @@ class MonoTradeCandidate:
     wear_name: str | None
     unit_price: float
     result: tradeup.SimulationResult
+
+    @property
+    def favorite_key(self) -> tuple[str, str, bool]:
+        return (self.collection_id, self.rarity_name, self.stattrak)
 
 
 def _representative_float(skin: Skin, wear_name: str | None) -> float:
@@ -104,11 +109,11 @@ def _build_mono_contract(
 
 def find_mono_trades(
     session: Session,
-    top_n: int = 25,
+    top_n: int | None = 25,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> list[MonoTradeCandidate]:
     """Every collection x tier x StatTrak mono trade, simulated and ranked by net
-    expected value (highest first), capped to `top_n`.
+    expected value (highest first), capped to `top_n` (or unlimited if None).
 
     `on_progress`, if given, is called as `on_progress(done, total)` after each of
     the `total` (rarity, StatTrak) tiers finishes — deliberately generic rather
@@ -127,6 +132,7 @@ def find_mono_trades(
             result = tradeup.simulate_contract(session, contract)
             candidates.append(
                 MonoTradeCandidate(
+                    collection_id=skin.collection_id,
                     collection_name=skin.collection.name,
                     rarity_name=rarity_name,
                     stattrak=stattrak,
@@ -141,4 +147,69 @@ def find_mono_trades(
             on_progress(done, len(combos))
 
     candidates.sort(key=lambda c: c.result.expected_value, reverse=True)
-    return candidates[:top_n]
+    return candidates if top_n is None else candidates[:top_n]
+
+
+def mono_trade_candidate_for(
+    session: Session, collection_id: str, rarity_name: str, stattrak: bool
+) -> MonoTradeCandidate | None:
+    """The current cheapest mono-trade contract for one specific (collection,
+    rarity, StatTrak) combo — same construction as find_mono_trades, just
+    scoped to one combo instead of surveying all of them. Used by the
+    favorites page to re-simulate a starred combo against current prices,
+    since the cheapest input can shift over time. Returns None if the combo
+    no longer has a priced, eligible cheapest input."""
+    skins = [
+        s for s in tradeup.eligible_input_skins(session, rarity_name, stattrak) if s.collection_id == collection_id
+    ]
+    cheapest_by_collection = _cheapest_inputs_by_collection(session, skins, stattrak)
+    entry = cheapest_by_collection.get(collection_id)
+    if entry is None:
+        return None
+
+    skin, market_item, unit_price = entry
+    contract = _build_mono_contract(skin, market_item, rarity_name, stattrak)
+    result = tradeup.simulate_contract(session, contract)
+    return MonoTradeCandidate(
+        collection_id=collection_id,
+        collection_name=skin.collection.name,
+        rarity_name=rarity_name,
+        stattrak=stattrak,
+        skin_name=skin.name,
+        wear_name=market_item.wear_name,
+        unit_price=unit_price,
+        result=result,
+    )
+
+
+# --- Favorites ---------------------------------------------------------------
+
+
+def favorite_keys(session: Session) -> set[tuple[str, str, bool]]:
+    """Every currently-favorited (collection_id, rarity_name, StatTrak) combo."""
+    rows = session.execute(
+        select(FavoriteMonoTrade.collection_id, FavoriteMonoTrade.rarity_name, FavoriteMonoTrade.stattrak)
+    ).all()
+    return {(r.collection_id, r.rarity_name, r.stattrak) for r in rows}
+
+
+def add_favorite(session: Session, collection_id: str, rarity_name: str, stattrak: bool) -> None:
+    exists = session.execute(
+        select(FavoriteMonoTrade.id)
+        .where(FavoriteMonoTrade.collection_id == collection_id)
+        .where(FavoriteMonoTrade.rarity_name == rarity_name)
+        .where(FavoriteMonoTrade.stattrak.is_(stattrak))
+    ).first()
+    if exists is None:
+        session.add(FavoriteMonoTrade(collection_id=collection_id, rarity_name=rarity_name, stattrak=stattrak))
+        session.commit()
+
+
+def remove_favorite(session: Session, collection_id: str, rarity_name: str, stattrak: bool) -> None:
+    session.execute(
+        delete(FavoriteMonoTrade)
+        .where(FavoriteMonoTrade.collection_id == collection_id)
+        .where(FavoriteMonoTrade.rarity_name == rarity_name)
+        .where(FavoriteMonoTrade.stattrak.is_(stattrak))
+    )
+    session.commit()

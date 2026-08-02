@@ -19,7 +19,7 @@ TOP_N = 25
 
 
 @st.cache_data(show_spinner=False, ttl=300)
-def _top_mono_trades() -> list[mono_trade.MonoTradeCandidate]:
+def _all_mono_trades() -> list[mono_trade.MonoTradeCandidate]:
     # Progress bar lives in a placeholder, cleared before return: on a cache miss
     # this renders and updates it, then removes it; on a cache hit Streamlit
     # replays the function's final element state, which is the emptied
@@ -34,22 +34,44 @@ def _top_mono_trades() -> list[mono_trade.MonoTradeCandidate]:
         )
 
     with SessionLocal() as session:
-        result = mono_trade.find_mono_trades(session, top_n=TOP_N, on_progress=_on_progress)
+        # Unfiltered and uncapped: the cache holds every combo so the max-cost
+        # filter below (which varies per rerun) can be applied without a cache
+        # miss, then top-N is taken from whatever survives the filter.
+        result = mono_trade.find_mono_trades(session, top_n=None, on_progress=_on_progress)
 
     progress.empty()
     return result
 
 
-candidates = _top_mono_trades()
+all_candidates = _all_mono_trades()
+
+max_cost = st.number_input(
+    "Max contract cost (10x input, $)",
+    min_value=0.0,
+    value=0.0,
+    step=10.0,
+    help="Filters out contracts whose 10x input cost exceeds this. 0 = no limit.",
+)
+
+candidates = [c for c in all_candidates if max_cost <= 0 or c.result.input_cost <= max_cost]
+candidates.sort(key=lambda c: c.result.expected_value, reverse=True)
+candidates = candidates[:TOP_N]
 
 if not candidates:
-    st.info("No priced mono trades found — check that both skin and price data have been imported.")
+    st.info(
+        "No priced mono trades found for this filter — check that both skin and price data have been "
+        "imported, or raise the max cost."
+    )
 else:
+    with SessionLocal() as session:
+        favorites = mono_trade.favorite_keys(session)
+
     rows = []
     for c in candidates:
         result = c.result
         rows.append(
             {
+                "★": "★" if c.favorite_key in favorites else "",
                 "Collection": c.collection_name,
                 "Tier": c.rarity_name,
                 "StatTrak™": c.stattrak,
@@ -77,6 +99,29 @@ else:
         hide_index=True,
         use_container_width=True,
     )
+
+    st.subheader("Favorite / unfavorite")
+    st.caption("Favorited contracts show up with live stats (CVaR, outcome distribution) on the Favorites page.")
+    for c in candidates:
+        is_favorite = c.favorite_key in favorites
+        icon_col, label_col = st.columns([1, 11])
+        clicked = icon_col.button(
+            "★" if is_favorite else "☆",
+            key=f"mono_fav_toggle_{c.collection_id}_{c.rarity_name}_{c.stattrak}",
+            help="Unfavorite" if is_favorite else "Favorite",
+        )
+        label_col.write(
+            f"{c.collection_name} — {c.rarity_name}{' (StatTrak™)' if c.stattrak else ''} — "
+            f"{c.skin_name} ({c.wear_name or '—'}) — "
+            f"input ${c.result.input_cost:,.2f} · EV net ${c.result.expected_value:,.2f}"
+        )
+        if clicked:
+            with SessionLocal() as session:
+                if is_favorite:
+                    mono_trade.remove_favorite(session, c.collection_id, c.rarity_name, c.stattrak)
+                else:
+                    mono_trade.add_favorite(session, c.collection_id, c.rarity_name, c.stattrak)
+            st.rerun()
 
     with st.expander("Missing price data by row"):
         any_missing = False

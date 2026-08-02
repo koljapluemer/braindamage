@@ -178,6 +178,49 @@ class SimulationResult:
     missing_output_price_names: list[str]
 
 
+# --- Outcome risk stats ---------------------------------------------------------
+
+
+def outcome_profits(result: SimulationResult) -> list[tuple[float, float]]:
+    """(profit, probability) pairs, one per possible outcome of a simulated
+    contract. Profit is what selling that single output nets versus what the 10
+    inputs cost — a missing output price counts as $0 net, the same convention
+    simulate_contract itself uses when it folds a priceless outcome into
+    expected_value."""
+    return [
+        ((o.net_price if o.net_price is not None else 0.0) - result.input_cost, o.probability)
+        for o in result.outcomes
+    ]
+
+
+def cvar(outcomes: list[tuple[float, float]], alpha: float = 0.05) -> float | None:
+    """Conditional Value at Risk: the probability-weighted average profit within
+    the worst `alpha` slice of the outcome distribution's probability mass.
+
+    Outcomes are sorted by profit ascending and consumed from the bottom until
+    `alpha` of probability mass is covered; an outcome straddling the cutoff
+    contributes only its covered fraction (standard discrete-CVaR treatment).
+    Returns None if `outcomes` carries no probability mass at all."""
+    total_p = sum(p for _, p in outcomes)
+    if total_p <= 0:
+        return None
+
+    remaining = alpha
+    weighted_sum = 0.0
+    covered = 0.0
+    for profit, p in sorted(outcomes, key=lambda x: x[0]):
+        if remaining <= 0:
+            break
+        take = min(p, remaining)
+        weighted_sum += profit * take
+        covered += take
+        remaining -= take
+
+    if covered <= 0:
+        return None
+    return weighted_sum / covered
+
+
 # --- DB-facing queries -----------------------------------------------------------
 
 _NON_WEAPON_CATEGORIES = ["Knives", "Gloves"]
