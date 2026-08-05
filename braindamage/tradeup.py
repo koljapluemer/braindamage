@@ -11,10 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
-from .models import MarketItem, Skin
-from .pricing import latest_prices
+from . import pricing
+from .models import Skin
 
 # Rarity ladder, ranked by color rather than name — weapon/knife/glove categories
 # use different name strings for equivalent tiers (e.g. gloves top out at
@@ -59,8 +59,7 @@ def next_rarity(rarity_name: str) -> str | None:
 
 
 # Standard wear buckets. A skin's actual float is clamped to its own
-# [min_float, max_float] before this is applied, and not every skin has a
-# MarketItem for every bucket — see resolve_market_item_by_float.
+# [min_float, max_float] before this is applied.
 WEAR_BUCKETS: list[tuple[str, float, float]] = [
     ("Factory New", 0.00, 0.07),
     ("Minimal Wear", 0.07, 0.15),
@@ -97,12 +96,10 @@ SELL_FEE_RATE = 0.15
 
 @dataclass
 class ContractLine:
-    market_item_id: str
     skin_id: str
     skin_name: str
     collection_id: str
     collection_name: str
-    wear_name: str
     float_value: float
     quantity: int
 
@@ -161,7 +158,6 @@ class Outcome:
     probability: float
     predicted_float: float
     predicted_wear: str
-    market_item_id: str | None
     gross_price: float | None
     net_price: float | None
     contribution: float
@@ -228,10 +224,10 @@ _NON_WEAPON_CATEGORIES = ["Knives", "Gloves"]
 
 def eligible_input_skins(session: Session, rarity_name: str, stattrak: bool) -> list[Skin]:
     """Weapon skins usable as trade-up inputs at `rarity_name`: excludes
-    knives/gloves, requires a collection, and requires that collection to have
-    >=1 skin at the next rarity tier (StatTrak-filtered too, if requested) —
-    otherwise the input would be a dead end (the wiki's Tec-9 | Ossified / Aztec
-    Collection example)."""
+    knives/gloves and souvenirs, requires a collection, and requires that
+    collection to have >=1 skin at the next rarity tier (StatTrak-filtered too)
+    — otherwise the input would be a dead end (the wiki's Tec-9 | Ossified /
+    Aztec Collection example)."""
     target = next_rarity(rarity_name)
     if target is None:
         return []
@@ -241,40 +237,31 @@ def eligible_input_skins(session: Session, rarity_name: str, stattrak: bool) -> 
         .where(Skin.rarity_name == target)
         .where(Skin.collection_id.is_not(None))
         .where(Skin.category_name.not_in(_NON_WEAPON_CATEGORIES))
+        .where(Skin.stattrak.is_(stattrak))
+        .where(Skin.souvenir.is_(False))
         .distinct()
     )
-    output_query = _apply_variant_filter(output_query, stattrak)
     output_collection_ids = set(session.scalars(output_query).all())
     if not output_collection_ids:
         return []
 
     input_query = (
         select(Skin)
-        .options(selectinload(Skin.collection))
         .where(Skin.rarity_name == rarity_name)
         .where(Skin.collection_id.in_(output_collection_ids))
         .where(Skin.category_name.not_in(_NON_WEAPON_CATEGORIES))
+        .where(Skin.stattrak.is_(stattrak))
+        .where(Skin.souvenir.is_(False))
         .order_by(Skin.name)
     )
-    input_query = _apply_variant_filter(input_query, stattrak)
     return list(session.scalars(input_query).all())
-
-
-def _apply_variant_filter(query, stattrak: bool):
-    """A skin can only be used/produced in a StatTrak contract if a StatTrak
-    variant of it exists; conversely a Souvenir-only skin (has_normal_variant is
-    False for exactly one skin today, MP5-SD | Lab Rats) can't appear in a normal
-    contract either."""
-    if stattrak:
-        return query.where(Skin.stattrak.is_(True))
-    return query.where(Skin.has_normal_variant.is_(True))
 
 
 @dataclass(frozen=True)
 class SkinOption:
     """One searchable trade-up input choice — a skin at a specific rarity and
     StatTrak state. Deliberately plain data (no ORM refs) so it's cheap to build
-    a combined list across every tier and cache it across Streamlit reruns."""
+    a combined list across every tier and cache it across UI refreshes."""
 
     skin_id: str
     skin_name: str
@@ -305,7 +292,7 @@ def eligible_input_options(session: Session) -> list[SkinOption]:
                         skin_id=skin.id,
                         skin_name=skin.name,
                         collection_id=skin.collection_id,
-                        collection_name=skin.collection.name,
+                        collection_name=skin.collection_name,
                         rarity_name=rarity_name,
                         stattrak=stattrak,
                         min_float=skin.min_float if skin.min_float is not None else 0.0,
@@ -315,59 +302,10 @@ def eligible_input_options(session: Session) -> list[SkinOption]:
     return options
 
 
-def resolve_market_item(
-    session: Session, skin_id: str, wear_name: str, stattrak: bool
-) -> MarketItem | None:
-    """Looks up the MarketItem for a skin+wear+StatTrak combo. For Doppler/Gamma
-    Doppler skins this is ambiguous (multiple phases share one wear+StatTrak
-    combo) — arbitrarily returns one, since phase is randomly assigned on output
-    regardless of input and isn't predictable either way."""
-    query = (
-        select(MarketItem)
-        .where(MarketItem.skin_id == skin_id)
-        .where(MarketItem.wear_name == wear_name)
-        .where(MarketItem.stattrak.is_(stattrak))
-        .where(MarketItem.souvenir.is_(False))
-    )
-    return session.scalars(query).first()
-
-
-def resolve_market_item_by_float(
-    session: Session, skin_id: str, stattrak: bool, target_float: float
-) -> MarketItem | None:
-    """Finds the MarketItem for `skin_id` whose wear bucket contains
-    `target_float`. If that skin has no MarketItem for the exact bucket (some
-    skins skip a wear tier), falls back to the available wear whose bucket
-    midpoint is closest. Wear is *always* derived this way, never chosen
-    independently — used both to resolve what a manually-entered input float
-    actually buys, and to predict an output's wear/price from the computed
-    output float."""
-    query = (
-        select(MarketItem.wear_name)
-        .where(MarketItem.skin_id == skin_id)
-        .where(MarketItem.stattrak.is_(stattrak))
-        .where(MarketItem.souvenir.is_(False))
-        .where(MarketItem.wear_name.is_not(None))
-        .distinct()
-    )
-    available = set(session.scalars(query).all())
-    if not available:
-        return None
-
-    target_wear = wear_for_float(target_float)
-    if target_wear not in available:
-        def midpoint_distance(wear_name: str) -> float:
-            lo, hi = wear_bucket_range(wear_name)
-            return abs((lo + hi) / 2 - target_float)
-
-        target_wear = min(available, key=midpoint_distance)
-
-    return resolve_market_item(session, skin_id, target_wear, stattrak)
-
-
 def simulate_contract(session: Session, contract: ContractState) -> SimulationResult:
     """Runs a complete, ready (10-input) contract: collection-weighted output
-    probabilities, predicted float/wear per outcome, latest known prices, and EV."""
+    probabilities, predicted float/wear per outcome, latest known prices (read
+    from each skin's JSON signals via braindamage.pricing), and EV."""
     if not contract.is_ready or contract.rarity_name is None:
         raise ValueError("Contract needs exactly 10 inputs before it can be simulated")
 
@@ -391,8 +329,9 @@ def simulate_contract(session: Session, contract: ContractState) -> SimulationRe
             .where(Skin.collection_id == collection_id)
             .where(Skin.rarity_name == target_rarity)
             .where(Skin.category_name.not_in(_NON_WEAPON_CATEGORIES))
+            .where(Skin.stattrak.is_(contract.stattrak))
+            .where(Skin.souvenir.is_(False))
         )
-        output_query = _apply_variant_filter(output_query, contract.stattrak)
         output_skins = list(session.scalars(output_query).all())
         m_c = len(output_skins)
         if m_c == 0:
@@ -405,39 +344,38 @@ def simulate_contract(session: Session, contract: ContractState) -> SimulationRe
         probability = collection_probability(n_c, m_c)
         outcome_specs.extend((skin, probability, collection_id) for skin in output_skins)
 
-    resolved: list[tuple[Skin, float, str, str, MarketItem | None, float]] = []
+    resolved: list[tuple[Skin, float, str, str, float]] = []
     for skin, probability, collection_id in outcome_specs:
         min_out = skin.min_float if skin.min_float is not None else 0.0
         max_out = skin.max_float if skin.max_float is not None else 1.0
         predicted = output_float(avg_float, min_out, max_out)
         predicted = min(max(predicted, min_out), max_out)
-        market_item = resolve_market_item_by_float(session, skin.id, contract.stattrak, predicted)
-        predicted_wear = market_item.wear_name if market_item else wear_for_float(predicted)
-        resolved.append((skin, probability, collection_id, predicted_wear, market_item, predicted))
-
-    input_ids = [line.market_item_id for line in contract.lines]
-    output_ids = [mi.id for *_, mi, _ in resolved if mi is not None]
-    prices = latest_prices(session, list({*input_ids, *output_ids}))
+        predicted_wear = wear_for_float(predicted)
+        resolved.append((skin, probability, collection_id, predicted_wear, predicted))
 
     input_cost = 0.0
     missing_input_price_names: list[str] = []
     for line in contract.lines:
-        price = prices.get(line.market_item_id)
-        if price is None:
-            missing_input_price_names.append(f"{line.skin_name} ({line.wear_name})")
+        wear = wear_for_float(line.float_value)
+        price_info = pricing.latest_price_for_wear(line.skin_id, wear)
+        if price_info is None:
+            missing_input_price_names.append(f"{line.skin_name} ({wear})")
         else:
+            price, _observed_at = price_info
             input_cost += price * line.quantity
 
     outcomes: list[Outcome] = []
     missing_output_price_names: list[str] = []
     expected_output_value = 0.0
-    for skin, probability, collection_id, predicted_wear, market_item, predicted in resolved:
-        gross_price = prices.get(market_item.id) if market_item else None
-        if gross_price is None:
+    for skin, probability, collection_id, predicted_wear, predicted in resolved:
+        price_info = pricing.latest_price_for_wear(skin.id, predicted_wear)
+        if price_info is None:
             missing_output_price_names.append(f"{skin.name} ({predicted_wear})")
+            gross_price = None
             net_price = None
             contribution = 0.0
         else:
+            gross_price, _observed_at = price_info
             net_price = gross_price * (1 - SELL_FEE_RATE)
             contribution = probability * net_price
             expected_output_value += probability * gross_price
@@ -449,7 +387,6 @@ def simulate_contract(session: Session, contract: ContractState) -> SimulationRe
                 probability=probability,
                 predicted_float=predicted,
                 predicted_wear=predicted_wear,
-                market_item_id=market_item.id if market_item else None,
                 gross_price=gross_price,
                 net_price=net_price,
                 contribution=contribution,

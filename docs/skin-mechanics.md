@@ -7,13 +7,15 @@ sources (game patch notes, wiki, direct data queries), not blog summaries.
 ## Data sources
 
 - `https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/skins.json`
-  — one row per skin *pattern* (weapon + finish). This is what we import into
-  the `skins` table.
+  — one row per skin *pattern* (weapon + finish); the shared metadata (name,
+  weapon, rarity, collection, float range) for every variant of that pattern.
 - `https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/skins_not_grouped.json`
   — one row per actual tradeable variant (wear tier × normal/StatTrak/Souvenir).
   Each row has a `skin_id` field that maps 1:1 back to the `id` of its base
-  pattern in `skins.json`. We only use this at import time to derive
-  `has_normal_variant` (see below); we don't store per-variant/per-wear rows.
+  pattern in `skins.json`. `scripts/import_catalog.py` groups this down to
+  (pattern, StatTrak, Souvenir, phase) — dropping wear — to build one `Skin`
+  row per tradeable listing; see docs/signals.md for why wear itself isn't a
+  separate row.
 - `https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/collections.json`
   — collections.
 
@@ -42,8 +44,9 @@ Takeaways:
   has a normal version — zero exceptions in the current dataset.
 - **Souvenir is *almost* always additive**, with one known exception:
   `MP5-SD | Lab Rats` (`skin-e73d6e7e9004`) exists only as Souvenir, capped at
-  Field-Tested wear, with no normal or StatTrak version. Stored as
-  `Skin.has_normal_variant = False`.
+  Field-Tested wear, with no normal or StatTrak version. Since `Skin` rows are
+  now per-variant (not per-pattern), this just means no normal-variant `Skin`
+  row gets created for it — no separate capability flag needed.
 - **StatTrak and Souvenir are mutually exclusive on a single item** — no
   "StatTrak Souvenir" variant exists.
 
@@ -84,41 +87,42 @@ Cloudflare), and official Valve patch notes pulled via Steam's
 ## Sufficiency for a future trade-up simulator
 
 Current schema (`collection_id`, `rarity_name`/`rarity_color`, `stattrak`,
-`souvenir`, `has_normal_variant`, `min_float`/`max_float`) covers everything
-above except one thing: **rarity has no explicit numeric rank**. Weapon
-skins, knives, and gloves use different name strings for the same
-conceptual tier (e.g. gloves' top tier is "Extraordinary," not "Covert"), so
-sorting must go by `rarity_color`, which is consistent across categories —
-a color→rank ladder needs to be hardcoded (grey → light blue → blue → purple
-→ pink → red → terminal gold "Contraband," which is excluded from normal
-progression). No new import fields required for this.
+`souvenir`, `min_float`/`max_float`) covers everything above except one
+thing: **rarity has no explicit numeric rank**. Weapon skins, knives, and
+gloves use different name strings for the same conceptual tier (e.g. gloves'
+top tier is "Extraordinary," not "Covert"), so sorting must go by
+`rarity_color`, which is consistent across categories — a color→rank ladder
+needs to be hardcoded (grey → light blue → blue → purple → pink → red →
+terminal gold "Contraband," which is excluded from normal progression). No
+new import fields required for this.
 
 ## Market items & pricing
 
-`skins_not_grouped.json` (already fetched by `run_import` to derive
-`has_normal_variant`, previously discarded otherwise) has one row per actual
-tradeable variant — wear × Normal/StatTrak/Souvenir — each carrying its own
-Steam-canonical `market_hash_name`. This is imported into a separate
-`MarketItem` table (`braindamage/models.py`), since `Skin` stays a
-pattern-level catalog entry and isn't itself the thing a price attaches to.
+`skins_not_grouped.json` has one row per actual tradeable variant — wear ×
+Normal/StatTrak/Souvenir — each carrying its own Steam-canonical
+`market_hash_name`. `Skin` doesn't store wear or `market_hash_name` directly
+(see docs/signals.md): a variant's market_hash_name is reconstructed on
+demand from `Skin.name` + StatTrak/Souvenir prefix + a wear bucket name
+(`braindamage/cs2cap_api.py::_market_hash_name`), and wear-specific price
+data lives in that skin's JSON signal files, tagged by `wear_name`.
 
 - **Doppler/Gamma Doppler collision**: 122 of the ~20.9k distinct
   `market_hash_name` values are shared by multiple `skin_id` patterns — one
   per Doppler phase (Ruby, Sapphire, Black Pearl, Phase 1-4) or Gamma Doppler
   phase (Emerald, Phase 1-4), since Steam's listing name doesn't encode
   phase. `pattern.id` does (e.g. `am_doppler_phase2`, `am_ruby_marbleized`),
-  so `MarketItem.phase` is derived from it via substring match
-  (`csgo_api._derive_phase`). The real tradeable identity is
-  `(market_hash_name, phase)`, not `market_hash_name` alone.
+  so `Skin.phase` is derived from it via substring match
+  (`scripts/import_catalog.py::_derive_phase`). The real tradeable identity
+  is `(market_hash_name, phase)`, not `market_hash_name` alone — CS2Cap's
+  `GET /prices` takes `phase` as a separate parameter for exactly this.
 - CS2Cap's price adapter (`braindamage/cs2cap_api.py`) uses `GET /prices`,
-  passing `market_hash_name` and, when set, `phase` — this resolves the
-  Doppler ambiguity cleanly, one request per `MarketItem`. `POST
-  /prices/batch` would let one request cover 100 items instead, but it
-  requires a Starter+ CS2Cap plan (confirmed via a live 403 on Free) and
-  has no `phase` parameter at all, so it can't disambiguate Doppler phases
-  even for paid tiers where it's available. Not used for that reason plus
-  the tier gate.
+  passing `market_hash_name` and, when set, `phase` — one request per wear
+  bucket per skin. `POST /prices/batch` would let one request cover 100
+  items instead, but it requires a Starter+ CS2Cap plan (confirmed via a
+  live 403 on Free) and has no `phase` parameter at all, so it can't
+  disambiguate Doppler phases even for paid tiers where it's available. Not
+  used for that reason plus the tier gate.
 - CS2Cap's `lowest_ask` is a sell-side/ask price only (cheapest current
-  listing) — there's no buy-order data on this endpoint. Stored as
-  `PriceObservation.side = "ask"`; the column exists generically for future
-  sources that do report bids.
+  listing) — there's no buy-order data on this endpoint. All price signals
+  in this app are ask-side for that reason; a `source` field on each signal
+  exists generically for future sources that report bids differently.

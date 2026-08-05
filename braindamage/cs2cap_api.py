@@ -9,14 +9,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import config
-from .db import SessionLocal
-from .models import MarketItem, MarketItemExternalId, PriceObservation, Skin
+from . import config, pricing, signals
+from .models import Skin
+from .tradeup import WEAR_BUCKETS
 
 BASE_URL = "https://api.cs2c.app/v1"
 
@@ -33,26 +32,11 @@ class Cs2capAPIError(RuntimeError):
 class PriceImportResult:
     requests_made: int
     observations: int
-    # market items for which CS2Cap returned no price data at all
-    items_not_found: int
+    # wear buckets for which CS2Cap returned no price data at all
+    wears_not_found: int
     # Set if a request failed partway through (e.g. rate limit). Whatever was fetched
     # before the failure is still committed — this just explains why the run stopped early.
     error: str | None = None
-
-
-def select_market_items(
-    session: Session, collection_id: str | None, variant: str | None
-) -> list[MarketItem]:
-    query = select(MarketItem).join(Skin, MarketItem.skin_id == Skin.id)
-    if collection_id:
-        query = query.where(Skin.collection_id == collection_id)
-    if variant == "normal":
-        query = query.where(MarketItem.stattrak.is_(False), MarketItem.souvenir.is_(False))
-    elif variant == "stattrak":
-        query = query.where(MarketItem.stattrak.is_(True))
-    elif variant == "souvenir":
-        query = query.where(MarketItem.souvenir.is_(True))
-    return list(session.scalars(query).all())
 
 
 def _fetch_prices(market_hash_name: str, phase: str | None, currency: str) -> dict:
@@ -60,9 +44,7 @@ def _fetch_prices(market_hash_name: str, phase: str | None, currency: str) -> di
     if phase:
         params["phase"] = phase
     url = f"{BASE_URL}/prices?{urllib.parse.urlencode(params)}"
-    request = urllib.request.Request(
-        url, headers={"Authorization": f"Bearer {config.CS2CAP_API_KEY}"}
-    )
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {config.CS2CAP_API_KEY}"})
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.load(response)
@@ -82,85 +64,82 @@ def _quote_price(quote: dict) -> float | None:
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
+    """Parses an API timestamp to a naive UTC datetime — signal timestamps are
+    always naive UTC throughout this app (see braindamage.pricing), so a
+    timezone-aware value here would silently break comparisons against them."""
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
-def _upsert_external_id(session: Session, market_item: MarketItem, external_id: object) -> None:
-    if external_id is None:
-        return
-    external_id = str(external_id)
-    existing = session.scalar(
-        select(MarketItemExternalId).where(
-            MarketItemExternalId.market_item_id == market_item.id,
-            MarketItemExternalId.source == "cs2cap",
-        )
-    )
-    if existing is None:
-        session.add(
-            MarketItemExternalId(market_item_id=market_item.id, source="cs2cap", external_id=external_id)
-        )
+def _market_hash_name(skin: Skin, wear_name: str) -> str:
+    if skin.stattrak:
+        prefix = "StatTrak™ "
+    elif skin.souvenir:
+        prefix = "Souvenir "
     else:
-        existing.external_id = external_id
+        prefix = ""
+    return f"{prefix}{skin.name} ({wear_name})"
 
 
-def run_price_import(
-    collection_id: str | None = None,
-    variant: str | None = None,
-    currency: str = "USD",
-) -> PriceImportResult:
+def run_price_import(session: Session, skin: Skin, currency: str = "USD") -> PriceImportResult:
+    """Fetches current prices for `skin` across every standard wear bucket and
+    appends them to its price_observations signal file, then recalculates
+    Skin.last_price from the refreshed signals. A wear bucket this skin doesn't
+    actually have a listing for (not every skin spans all five) is expected and
+    simply counted, not treated as an error."""
     if not config.CS2CAP_API_KEY:
         raise RuntimeError("CS2CAP_API_KEY is not set")
 
     requests_made = 0
-    observations = 0
-    items_not_found = 0
+    observations: list[signals.PriceObservationSignal] = []
+    wears_not_found = 0
     error: str | None = None
 
-    with SessionLocal() as session:
-        market_items = select_market_items(session, collection_id, variant)
+    for wear_name, _lo, _hi in WEAR_BUCKETS:
+        market_hash_name = _market_hash_name(skin, wear_name)
+        try:
+            response = _fetch_prices(market_hash_name, skin.phase, currency)
+        except Cs2capAPIError as exc:
+            error = str(exc)
+            break
+        requests_made += 1
 
-        for market_item in market_items:
-            try:
-                response = _fetch_prices(market_item.market_hash_name, market_item.phase, currency)
-            except Cs2capAPIError as exc:
-                error = str(exc)
-                break
-            requests_made += 1
+        quotes = response.get("items") or []
+        if not quotes:
+            wears_not_found += 1
+            continue
 
-            quotes = response.get("items") or []
-            if not quotes:
-                items_not_found += 1
+        fetched_at = signals.now_utc()
+        for quote in quotes:
+            price = _quote_price(quote)
+            if price is None:
                 continue
-
-            for quote in quotes:
-                price = _quote_price(quote)
-                if price is None:
-                    continue
-                session.add(
-                    PriceObservation(
-                        market_item_id=market_item.id,
-                        source="cs2cap",
-                        provider=quote.get("provider"),
-                        side="ask",
-                        currency=currency,
-                        price=price,
-                        quantity=quote.get("quantity"),
-                        observed_at=_parse_timestamp(quote.get("timestamp")),
-                        raw=quote,
-                    )
+            observations.append(
+                signals.PriceObservationSignal(
+                    source="cs2cap",
+                    wear_name=wear_name,
+                    price=price,
+                    currency=currency,
+                    observed_at=_parse_timestamp(quote.get("timestamp")),
+                    fetched_at=fetched_at,
+                    raw=quote,
                 )
-                observations += 1
-                _upsert_external_id(session, market_item, quote.get("item_id"))
-            session.commit()
+            )
+
+    signals.append_price_observations(skin.id, observations)
+    pricing.recalculate_last_price(skin)
+    session.commit()
 
     return PriceImportResult(
         requests_made=requests_made,
-        observations=observations,
-        items_not_found=items_not_found,
+        observations=len(observations),
+        wears_not_found=wears_not_found,
         error=error,
     )

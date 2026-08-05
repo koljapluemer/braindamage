@@ -7,9 +7,10 @@ requires-python = ">=3.14"
 dependencies = [
     "alembic>=1.18.5",
     "duckdb>=1.5.5",
+    "pydantic>=2.9",
     "python-dotenv>=1.2.2",
     "sqlalchemy>=2.0.51",
-    "streamlit>=1.60.0",
+    "textual>=0.89",
 ]
 
 [dependency-groups]

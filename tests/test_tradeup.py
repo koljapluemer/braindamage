@@ -1,30 +1,89 @@
-import pytest
+from datetime import datetime
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from braindamage import pricing, signals
+from braindamage.models import Base, Skin
 from braindamage.tradeup import (
     INPUT_RARITIES,
     RARITY_LADDER,
     ContractLine,
+    ContractState,
     average_float,
     collection_probability,
     cvar,
+    eligible_input_skins,
     next_rarity,
     output_float,
     rarity_rank,
+    simulate_contract,
     wear_for_float,
 )
 
 
 def _line(float_value: float, quantity: int) -> ContractLine:
     return ContractLine(
-        market_item_id="mi",
         skin_id="skin",
         skin_name="Test Skin",
         collection_id="col",
         collection_name="Test Collection",
-        wear_name="Field-Tested",
         float_value=float_value,
         quantity=quantity,
     )
+
+
+@pytest.fixture
+def signals_dir(tmp_path, monkeypatch):
+    path = tmp_path / "skins"
+    monkeypatch.setattr(signals, "SKINS_DIR", path)
+    return path
+
+
+@pytest.fixture
+def session(signals_dir):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db_session:
+        yield db_session
+
+
+def _make_skin(
+    session: Session,
+    *,
+    id: str,
+    name: str,
+    rarity_name: str,
+    collection_id: str = "col-a",
+    collection_name: str = "Collection A",
+    stattrak: bool = False,
+    souvenir: bool = False,
+    min_float: float = 0.0,
+    max_float: float = 1.0,
+    category_name: str = "Rifle",
+) -> Skin:
+    skin = Skin(
+        id=id,
+        name=name,
+        weapon_name="Weapon",
+        pattern_name="Pattern",
+        category_name=category_name,
+        rarity_name=rarity_name,
+        rarity_color=None,
+        min_float=min_float,
+        max_float=max_float,
+        stattrak=stattrak,
+        souvenir=souvenir,
+        phase=None,
+        paint_index=None,
+        collection_id=collection_id,
+        collection_name=collection_name,
+        image_url=None,
+    )
+    session.add(skin)
+    session.flush()
+    return skin
 
 
 class TestWearForFloat:
@@ -132,3 +191,178 @@ class TestCvar:
 
     def test_no_probability_mass_returns_none(self):
         assert cvar([], alpha=0.05) is None
+
+
+class TestPricingSignals:
+    """Price resolution now reads a skin's JSON signal files instead of a SQL
+    table — see braindamage/signals.py and braindamage/pricing.py."""
+
+    def test_latest_price_for_wear_picks_most_recent_observation(self, signals_dir):
+        signals.append_price_observations(
+            "skin-a",
+            [
+                signals.PriceObservationSignal(
+                    source="cs2cap", wear_name="Field-Tested", price=10.0,
+                    fetched_at=datetime(2026, 1, 1),
+                ),
+                signals.PriceObservationSignal(
+                    source="cs2cap", wear_name="Field-Tested", price=12.0,
+                    fetched_at=datetime(2026, 1, 2),
+                ),
+                # Different wear — must not be picked for a Field-Tested lookup.
+                signals.PriceObservationSignal(
+                    source="cs2cap", wear_name="Factory New", price=99.0,
+                    fetched_at=datetime(2026, 1, 3),
+                ),
+            ],
+        )
+
+        result = pricing.latest_price_for_wear("skin-a", "Field-Tested")
+        assert result is not None
+        price, observed_at = result
+        assert price == pytest.approx(12.0)
+        assert observed_at == datetime(2026, 1, 2)
+
+    def test_latest_price_for_wear_missing_data_returns_none(self, signals_dir):
+        assert pricing.latest_price_for_wear("no-such-skin", "Field-Tested") is None
+
+    def test_recalculate_last_price_uses_latest_across_all_wears(self, session, signals_dir):
+        skin = _make_skin(session, id="skin-b", name="Test Skin", rarity_name="Restricted")
+        signals.append_price_observations(
+            "skin-b",
+            [
+                signals.PriceObservationSignal(
+                    source="cs2cap", wear_name="Factory New", price=20.0,
+                    fetched_at=datetime(2026, 1, 1),
+                ),
+                signals.PriceObservationSignal(
+                    source="cs2cap", wear_name="Battle-Scarred", price=5.0,
+                    fetched_at=datetime(2026, 1, 5),
+                ),
+            ],
+        )
+
+        pricing.recalculate_last_price(skin)
+
+        assert skin.last_price == pytest.approx(5.0)
+        assert skin.last_price_calculation_data_point_recency == datetime(2026, 1, 5)
+        assert skin.last_price_recalculated_at is not None
+
+    def test_recalculate_last_price_with_no_signals_clears_price(self, session, signals_dir):
+        skin = _make_skin(session, id="skin-c", name="Test Skin", rarity_name="Restricted")
+        skin.last_price = 42.0
+
+        pricing.recalculate_last_price(skin)
+
+        assert skin.last_price is None
+        assert skin.last_price_calculation_data_point_recency is None
+        assert skin.last_price_recalculated_at is not None
+
+
+class TestEligibleInputSkins:
+    def test_requires_next_rarity_output_in_same_collection(self, session):
+        _make_skin(session, id="in-1", name="Eligible Input", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-1", name="Output", rarity_name="Restricted")
+        # A dead-end collection: has a Mil-Spec skin but no Restricted output.
+        _make_skin(
+            session, id="in-2", name="Dead End Input", rarity_name="Mil-Spec Grade",
+            collection_id="col-b", collection_name="Collection B",
+        )
+
+        results = eligible_input_skins(session, "Mil-Spec Grade", stattrak=False)
+
+        assert [s.id for s in results] == ["in-1"]
+
+    def test_stattrak_pools_dont_cross_with_normal(self, session):
+        _make_skin(session, id="in-1", name="Normal Input", rarity_name="Mil-Spec Grade", stattrak=False)
+        _make_skin(session, id="out-1", name="Normal Output", rarity_name="Restricted", stattrak=False)
+        _make_skin(session, id="in-st", name="ST Input", rarity_name="Mil-Spec Grade", stattrak=True)
+        _make_skin(session, id="out-st", name="ST Output", rarity_name="Restricted", stattrak=True)
+
+        normal_results = eligible_input_skins(session, "Mil-Spec Grade", stattrak=False)
+        stattrak_results = eligible_input_skins(session, "Mil-Spec Grade", stattrak=True)
+
+        assert [s.id for s in normal_results] == ["in-1"]
+        assert [s.id for s in stattrak_results] == ["in-st"]
+
+    def test_knives_and_gloves_excluded(self, session):
+        _make_skin(session, id="knife-1", name="Knife", rarity_name="Mil-Spec Grade", category_name="Knives")
+        _make_skin(session, id="out-1", name="Output", rarity_name="Restricted", category_name="Knives")
+
+        assert eligible_input_skins(session, "Mil-Spec Grade", stattrak=False) == []
+
+
+class TestSimulateContract:
+    def test_end_to_end_ev_and_roi(self, session, signals_dir):
+        input_skin = _make_skin(
+            session, id="input-skin", name="Input Skin", rarity_name="Mil-Spec Grade",
+            min_float=0.0, max_float=1.0,
+        )
+        output_skin = _make_skin(
+            session, id="output-skin", name="Output Skin", rarity_name="Restricted",
+            min_float=0.0, max_float=1.0,
+        )
+
+        # avg_float = 0.5 -> output_float = 0.5 -> wear_for_float(0.5) == "Battle-Scarred"
+        # for both the input lookup and the (only) possible output.
+        signals.append_price_observations(
+            input_skin.id,
+            [signals.PriceObservationSignal(source="cs2cap", wear_name="Battle-Scarred", price=10.0, fetched_at=datetime(2026, 1, 1))],
+        )
+        signals.append_price_observations(
+            output_skin.id,
+            [signals.PriceObservationSignal(source="cs2cap", wear_name="Battle-Scarred", price=50.0, fetched_at=datetime(2026, 1, 1))],
+        )
+
+        contract = ContractState(
+            rarity_name="Mil-Spec Grade",
+            stattrak=False,
+            lines=[
+                ContractLine(
+                    skin_id=input_skin.id, skin_name=input_skin.name,
+                    collection_id="col-a", collection_name="Collection A",
+                    float_value=0.5, quantity=10,
+                )
+            ],
+        )
+
+        result = simulate_contract(session, contract)
+
+        assert result.input_cost == pytest.approx(100.0)  # 10 * $10
+        assert len(result.outcomes) == 1
+        outcome = result.outcomes[0]
+        assert outcome.skin_id == output_skin.id
+        assert outcome.probability == pytest.approx(1.0)  # only collection, only output
+        assert outcome.predicted_wear == "Battle-Scarred"
+        assert outcome.gross_price == pytest.approx(50.0)
+        assert outcome.net_price == pytest.approx(50.0 * 0.85)
+        assert result.expected_output_value == pytest.approx(50.0)
+        assert result.expected_value == pytest.approx(50.0 * 0.85 - 100.0)
+        assert result.roi == pytest.approx((50.0 * 0.85 - 100.0) / 100.0)
+        assert result.missing_input_price_names == []
+        assert result.missing_output_price_names == []
+
+    def test_missing_price_is_tracked_not_raised(self, session, signals_dir):
+        input_skin = _make_skin(session, id="input-skin", name="Input Skin", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="output-skin", name="Output Skin", rarity_name="Restricted")
+        # No price signals written at all.
+
+        contract = ContractState(
+            rarity_name="Mil-Spec Grade",
+            stattrak=False,
+            lines=[
+                ContractLine(
+                    skin_id=input_skin.id, skin_name=input_skin.name,
+                    collection_id="col-a", collection_name="Collection A",
+                    float_value=0.5, quantity=10,
+                )
+            ],
+        )
+
+        result = simulate_contract(session, contract)
+
+        assert result.input_cost == pytest.approx(0.0)
+        assert result.missing_input_price_names == ["Input Skin (Battle-Scarred)"]
+        assert result.missing_output_price_names == ["Output Skin (Battle-Scarred)"]
+        assert result.outcomes[0].gross_price is None
+        assert result.outcomes[0].net_price is None
