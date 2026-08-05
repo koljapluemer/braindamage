@@ -11,6 +11,7 @@ dependencies = [
     "pyside6>=6.7",
     "python-dotenv>=1.2.2",
     "sqlalchemy>=2.0.51",
+    "tqdm>=4.70.0",
 ]
 
 [dependency-groups]

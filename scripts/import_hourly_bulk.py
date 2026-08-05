@@ -3,17 +3,20 @@
 aggregated_prices.json signal files.
 
 Throwaway per this project's price-integration philosophy: run by hand once
-(`uv run python scripts/import_hourly_bulk.py`), not wired into the app. Uses
-DuckDB to read the parquet files and match them out-of-core against a
-Skin-derived lookup table, same rationale as this project's old
-hourly_price_import.py: tens of millions of rows is too much to push through
-the ORM row-by-row.
+(`uv run python scripts/import_hourly_bulk.py`), not wired into the app. This
+dataset is only a test bed for trade-up EV, which needs one current "price to
+acquire"/"price to sell into" per skin x wear x normal/StatTrak/Souvenir, not
+a price history — so rather than pulling tens of millions of rows through
+Python, DuckDB does the reduction to "latest row per (skin, wear, source)"
+out-of-core via a single hash aggregation (`arg_max`), and only that tiny
+result (bounded by skin x wear x source cardinality, not by row count) ever
+reaches Python. Same join rationale as this project's old
+hourly_price_import.py: matching tens of millions of rows is too much for the
+ORM row-by-row.
 
 Only the ask side is imported — trade-up EV only ever needs "price to
 acquire"/"price to sell into", both approximated from ask elsewhere in this
-app (see braindamage/cs2cap_api.py). Matched rows are buffered per skin and
-flushed to that skin's JSON file in bounded batches, so a skin's file gets a
-handful of read-modify-write cycles over the whole import, not one per row.
+app (see braindamage/cs2cap_api.py).
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import duckdb
 from sqlalchemy import select
+from tqdm import tqdm
 
 from braindamage import pricing, signals
 from braindamage.db import SessionLocal
@@ -40,10 +44,6 @@ AGGREGATE_PARQUET = DATASET_DIR / "cs2_market_aggregate_hourly.parquet"
 
 LISTING_SOURCES = ("buff", "csfloat", "youpin")
 _DUCKDB_MEMORY_LIMIT = "512MB"
-_FETCH_BATCH = 100_000
-# Flush a skin's buffered new signals to disk once it accumulates this many —
-# bounds both memory and the number of read-modify-write cycles per skin file.
-_FLUSH_THRESHOLD_PER_SKIN = 5_000
 
 _UNBOUNDED_START = date(2000, 1, 1)
 _UNBOUNDED_END = date(2100, 1, 1)
@@ -51,15 +51,15 @@ _UNBOUNDED_END = date(2100, 1, 1)
 
 @dataclass
 class HourlyImportResult:
-    rows_read: int
     rows_matched: int
-    rows_written: int
+    skins_written: int
 
 
 def _open_duckdb() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect()
     con.execute(f"PRAGMA memory_limit='{_DUCKDB_MEMORY_LIMIT}'")
     con.execute("PRAGMA threads=2")
+    con.execute("PRAGMA enable_progress_bar")
     return con
 
 
@@ -111,30 +111,31 @@ _MATCH_CTE = """
 """
 
 
-class _SkinBatchFlusher:
-    def __init__(self, threshold: int = _FLUSH_THRESHOLD_PER_SKIN) -> None:
-        self._threshold = threshold
-        self._buffers: dict[str, list[signals.AggregatedPriceSignal]] = defaultdict(list)
-        self._buffered_count = 0
-        self.rows_written = 0
+def _write_latest_signals(rows: list[tuple]) -> int:
+    """rows: (skin_id, wear_name, source, bucket_iso, open, high, low, close, volume),
+    one row per (skin_id, wear_name, source) already reduced to its latest bucket by
+    DuckDB. Grouped by skin so each skin's file gets a single read-modify-write."""
+    by_skin: dict[str, list[signals.AggregatedPriceSignal]] = defaultdict(list)
+    for skin_id, wear_name, source, bucket, o, h, low, c, vol in rows:
+        if skin_id is None:
+            continue
+        by_skin[skin_id].append(
+            signals.AggregatedPriceSignal(
+                source=source,
+                wear_name=wear_name,
+                bucket=datetime.fromisoformat(bucket),
+                open=o,
+                high=h,
+                low=low,
+                close=c,
+                volume=vol,
+            )
+        )
 
-    def add(self, skin_id: str, signal: signals.AggregatedPriceSignal) -> None:
-        self._buffers[skin_id].append(signal)
-        self._buffered_count += 1
-        if len(self._buffers[skin_id]) >= self._threshold:
-            self._flush_skin(skin_id)
+    for skin_id, skin_signals in tqdm(by_skin.items(), desc="writing skin signal files", unit="skin"):
+        signals.append_aggregated_prices(skin_id, skin_signals)
 
-    def _flush_skin(self, skin_id: str) -> None:
-        batch = self._buffers.pop(skin_id, [])
-        if not batch:
-            return
-        signals.append_aggregated_prices(skin_id, batch)
-        self.rows_written += len(batch)
-        self._buffered_count -= len(batch)
-
-    def flush_all(self) -> None:
-        for skin_id in list(self._buffers):
-            self._flush_skin(skin_id)
+    return len(by_skin)
 
 
 def run_listing_import(
@@ -143,49 +144,27 @@ def run_listing_import(
     end: date = _UNBOUNDED_END,
 ) -> HourlyImportResult:
     con = _open_duckdb()
-    flusher = _SkinBatchFlusher()
-    rows_read = 0
-    rows_matched = 0
     try:
         _load_skin_variants(con)
         query = (
             _MATCH_CTE.format(where="bucket >= ? AND bucket < ? AND source = ANY(?)")
             + """
             SELECT skin_id, wear_name, source,
-                   strftime(bucket, '%Y-%m-%dT%H:%M:%S'),
-                   open_ask, high_ask, low_ask, close_ask, ask_volume
+                   strftime(max(bucket), '%Y-%m-%dT%H:%M:%S'),
+                   arg_max(open_ask, bucket), arg_max(high_ask, bucket),
+                   arg_max(low_ask, bucket), arg_max(close_ask, bucket),
+                   arg_max(ask_volume, bucket)
             FROM matched
+            WHERE skin_id IS NOT NULL
+            GROUP BY skin_id, wear_name, source
             """
         )
-        cur = con.execute(query, [str(LISTING_PARQUET), start, end, list(sources)])
-
-        while True:
-            chunk = cur.fetchmany(_FETCH_BATCH)
-            if not chunk:
-                break
-            rows_read += len(chunk)
-            for skin_id, wear_name, source, bucket, o, h, low, c, vol in chunk:
-                if skin_id is None:
-                    continue
-                rows_matched += 1
-                flusher.add(
-                    skin_id,
-                    signals.AggregatedPriceSignal(
-                        source=source,
-                        wear_name=wear_name,
-                        bucket=datetime.fromisoformat(bucket),
-                        open=o,
-                        high=h,
-                        low=low,
-                        close=c,
-                        volume=vol,
-                    ),
-                )
-        flusher.flush_all()
+        rows = con.execute(query, [str(LISTING_PARQUET), start, end, list(sources)]).fetchall()
     finally:
         con.close()
 
-    return HourlyImportResult(rows_read=rows_read, rows_matched=rows_matched, rows_written=flusher.rows_written)
+    skins_written = _write_latest_signals(rows)
+    return HourlyImportResult(rows_matched=len(rows), skins_written=skins_written)
 
 
 def run_aggregate_import(
@@ -193,44 +172,27 @@ def run_aggregate_import(
     end: date = _UNBOUNDED_END,
 ) -> HourlyImportResult:
     con = _open_duckdb()
-    flusher = _SkinBatchFlusher()
-    rows_read = 0
-    rows_matched = 0
     try:
         _load_skin_variants(con)
         query = (
             _MATCH_CTE.format(where="bucket >= ? AND bucket < ?")
             + """
-            SELECT skin_id, wear_name, strftime(bucket, '%Y-%m-%dT%H:%M:%S'), ask, ask_volume
+            SELECT skin_id, wear_name, 'cs2sh_aggregate',
+                   strftime(max(bucket), '%Y-%m-%dT%H:%M:%S'),
+                   NULL, NULL, NULL,
+                   arg_max(ask, bucket),
+                   arg_max(ask_volume, bucket)
             FROM matched
+            WHERE skin_id IS NOT NULL
+            GROUP BY skin_id, wear_name
             """
         )
-        cur = con.execute(query, [str(AGGREGATE_PARQUET), start, end])
-
-        while True:
-            chunk = cur.fetchmany(_FETCH_BATCH)
-            if not chunk:
-                break
-            rows_read += len(chunk)
-            for skin_id, wear_name, bucket, ask, ask_volume in chunk:
-                if skin_id is None:
-                    continue
-                rows_matched += 1
-                flusher.add(
-                    skin_id,
-                    signals.AggregatedPriceSignal(
-                        source="cs2sh_aggregate",
-                        wear_name=wear_name,
-                        bucket=datetime.fromisoformat(bucket),
-                        close=ask,
-                        volume=ask_volume,
-                    ),
-                )
-        flusher.flush_all()
+        rows = con.execute(query, [str(AGGREGATE_PARQUET), start, end]).fetchall()
     finally:
         con.close()
 
-    return HourlyImportResult(rows_read=rows_read, rows_matched=rows_matched, rows_written=flusher.rows_written)
+    skins_written = _write_latest_signals(rows)
+    return HourlyImportResult(rows_matched=len(rows), skins_written=skins_written)
 
 
 def recalculate_all_last_prices() -> int:
@@ -244,10 +206,10 @@ def recalculate_all_last_prices() -> int:
 
 if __name__ == "__main__":
     listing_result = run_listing_import()
-    print(f"listing: read={listing_result.rows_read} matched={listing_result.rows_matched} written={listing_result.rows_written}")
+    print(f"listing: matched={listing_result.rows_matched} skins_written={listing_result.skins_written}")
 
     aggregate_result = run_aggregate_import()
-    print(f"aggregate: read={aggregate_result.rows_read} matched={aggregate_result.rows_matched} written={aggregate_result.rows_written}")
+    print(f"aggregate: matched={aggregate_result.rows_matched} skins_written={aggregate_result.skins_written}")
 
     recalculated = recalculate_all_last_prices()
     print(f"recalculated last_price for {recalculated} skins")
