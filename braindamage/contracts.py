@@ -89,6 +89,32 @@ def upsert_contract(session: Session, contract: ContractState, result: Simulatio
     return row
 
 
+def is_calculable(contract: Contract) -> bool:
+    """False if any input/output price was missing at simulation time, meaning
+    `contract`'s EV/ROI/CVaR were computed against incomplete data."""
+    return not contract.missing_input_price_names and not contract.missing_output_price_names
+
+
+def filter_contracts(
+    contracts: list[Contract],
+    *,
+    hide_bad_trades: bool = True,
+    hide_uncalculable_trades: bool = True,
+    max_cost: float = 0.0,
+) -> list[Contract]:
+    """Contracts list page filter: drop negative-EV contracts, drop contracts
+    simulated with missing prices, and cap input_cost -- `max_cost <= 0` means
+    no cap."""
+    result = contracts
+    if hide_bad_trades:
+        result = [c for c in result if c.expected_value >= 0]
+    if hide_uncalculable_trades:
+        result = [c for c in result if is_calculable(c)]
+    if max_cost > 0:
+        result = [c for c in result if c.input_cost <= max_cost]
+    return result
+
+
 def set_favorite(session: Session, contract_row_id: str, favorite: bool) -> None:
     row = session.get(Contract, contract_row_id)
     if row is None:
