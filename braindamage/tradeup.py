@@ -122,16 +122,15 @@ class ContractState:
 # --- Pure math -----------------------------------------------------------------
 
 
-def average_float(lines: list[ContractLine]) -> float:
-    """Plain mean float across all 10 inputs, weighted by quantity — the formula
-    Valve actually uses (confirmed against docs/skin-mechanics.md, the Fandom
-    wiki, and several independent open-source trade-up calculators), not a
-    per-input normalized-to-0-1 average some marketing-blog sources claim."""
-    total_quantity = sum(line.quantity for line in lines)
-    if total_quantity == 0:
-        raise ValueError("Cannot average the float of zero inputs")
-    weighted_sum = sum(line.float_value * line.quantity for line in lines)
-    return weighted_sum / total_quantity
+def normalized_float(raw_float: float, min_float: float, max_float: float) -> float:
+    """A raw float's position within [min_float, max_float], rescaled to a
+    universal 0-1 scale -- 0 at that skin's own best-condition end, 1 at its
+    own worst. Degenerate (min_float == max_float) ranges normalize to 0.0
+    rather than dividing by zero."""
+    span = max_float - min_float
+    if span <= 0:
+        return 0.0
+    return (min(max(raw_float, min_float), max_float) - min_float) / span
 
 
 def output_float(avg_float: float, min_out: float, max_out: float) -> float:
@@ -302,6 +301,36 @@ def eligible_input_options(session: Session) -> list[SkinOption]:
     return options
 
 
+def average_float(session: Session, lines: list[ContractLine]) -> float:
+    """Average input float on the *normalized* 0-1 scale trade-ups actually use,
+    weighted by quantity: each line's raw float is first rescaled against its
+    own skin's [min_float, max_float] (see normalized_float) before averaging,
+    then that average is fed into output_float as-is.
+
+    This needs a DB lookup per distinct input skin, unlike a plain mean, because
+    each skin's own float cap changes what its raw float means on the shared
+    0-1 scale. Before the 2025-10-23 "Retakes" update, Valve used the raw
+    (un-normalized) mean here -- several older calculators and a stale draft of
+    docs/skin-mechanics.md still describe that formula, but it no longer matches
+    live behavior (confirmed against SteamDB's and multiple independent
+    community write-ups of the post-patch mechanics, and reproduces the
+    community-documented P250 | Supernova example: a Factory New copy at raw
+    float 0.05, in a 0.00-0.40 range, normalizes to 0.125 -- Minimal Wear on a
+    full-range output, not Factory New)."""
+    total_quantity = sum(line.quantity for line in lines)
+    if total_quantity == 0:
+        raise ValueError("Cannot average the float of zero inputs")
+
+    weighted_sum = 0.0
+    for line in lines:
+        skin = session.get(Skin, line.skin_id)
+        min_float = skin.min_float if skin is not None and skin.min_float is not None else 0.0
+        max_float = skin.max_float if skin is not None and skin.max_float is not None else 1.0
+        weighted_sum += normalized_float(line.float_value, min_float, max_float) * line.quantity
+
+    return weighted_sum / total_quantity
+
+
 def _resolve_outcome_specs(
     session: Session, contract: ContractState, target_rarity: str
 ) -> tuple[list[tuple[Skin, float, str]], dict[str, str]]:
@@ -353,7 +382,7 @@ def simulate_contract(session: Session, contract: ContractState) -> SimulationRe
     if target_rarity is None:
         raise ValueError(f"{contract.rarity_name} has no next rarity tier")
 
-    avg_float = average_float(contract.lines)
+    avg_float = average_float(session, contract.lines)
     outcome_specs, collection_names = _resolve_outcome_specs(session, contract, target_rarity)
 
     resolved: list[tuple[Skin, float, str, str, float]] = []
@@ -437,44 +466,31 @@ class EvCurvePoint:
     stdev: float
 
 
-def average_float_achievable_range(session: Session, contract: ContractState) -> tuple[float, float]:
-    """The [lo, hi] band `average_float(contract.lines)` could possibly fall in,
-    given the specific skins (and quantities) already chosen for `contract` --
-    each input line's float is bounded by its own skin's [min_float, max_float],
-    so the quantity-weighted average is bounded by the same weighted average of
-    those per-line bounds. This is what simulate_ev_curve sweeps, not the full
-    [0, 1] range, since floats outside it aren't achievable with this exact
-    contract's inputs."""
-    total_quantity = sum(line.quantity for line in contract.lines)
-    if total_quantity == 0:
-        raise ValueError("Cannot compute an achievable float range for zero inputs")
-
-    weighted_lo = 0.0
-    weighted_hi = 0.0
-    for line in contract.lines:
-        skin = session.get(Skin, line.skin_id)
-        lo = skin.min_float if skin is not None and skin.min_float is not None else line.float_value
-        hi = skin.max_float if skin is not None and skin.max_float is not None else line.float_value
-        weighted_lo += lo * line.quantity
-        weighted_hi += hi * line.quantity
-
-    return weighted_lo / total_quantity, weighted_hi / total_quantity
-
-
 def simulate_ev_curve(session: Session, contract: ContractState, n_samples: int = 100) -> list[EvCurvePoint]:
-    """Samples `n_samples` equally-spaced hypothetical average input floats
-    across `contract`'s achievable range (see average_float_achievable_range),
-    and for each, prices both sides with simple wear-bucket prices rather than
-    per-cent float precision: every input line is priced at the wear bucket its
-    own float range clamps `avg_float` to, and every possible outcome is priced
-    at the wear bucket its predicted_float (via the real output_float formula)
-    falls into. The spread (stdev) of an outcome's possible net prices around
-    the sample's expected revenue is reported per-sample as the curve's error
+    """Samples `n_samples` equally-spaced hypothetical average *normalized*
+    input floats across the universal [0, 1] scale trade-ups actually average
+    on (see average_float) -- 0 means "every input at its own best-condition
+    end", 1 means "every input at its own worst end". Unlike a raw float
+    range, [0, 1] is achievable for any contract regardless of which specific
+    skins were chosen, since normalization maps every skin's own float cap
+    onto the same scale.
+
+    For each sample, both sides are priced with simple wear-bucket prices
+    rather than per-cent float precision:
+    - Every input line is priced at the wear bucket its own skin's range maps
+      that normalized position to -- output_float(x, skin_min, skin_max), the
+      same linear remap the game itself uses, just run against an input's own
+      range instead of an output's.
+    - Every possible outcome is priced at the wear bucket its predicted_float
+      (output_float(x, out_min, out_max)) falls into.
+
+    The spread (stdev) of an outcome's possible net prices around the
+    sample's expected revenue is reported per-sample as the curve's error
     bar, since a single trade-up draws exactly one of many possible outputs.
 
-    This intentionally does *not* use `contract.lines`' actual chosen floats --
-    it's a "what if I sourced this same set of skins at a different average
-    float" curve, independent of the specific float the user picked.
+    This intentionally does *not* use `contract.lines`' actual chosen floats
+    -- it's a "what if my inputs averaged a different normalized float"
+    curve, independent of the specific float the user picked.
     """
     if not contract.is_ready or contract.rarity_name is None:
         raise ValueError("Contract needs exactly 10 inputs before its EV curve can be simulated")
@@ -484,12 +500,12 @@ def simulate_ev_curve(session: Session, contract: ContractState, n_samples: int 
         raise ValueError(f"{contract.rarity_name} has no next rarity tier")
 
     # skin_id -> (min_float, max_float, quantity), collapsed across lines sharing
-    # a skin so a repeated skin isn't priced/clamped redundantly per sample.
+    # a skin so a repeated skin isn't priced redundantly per sample.
     line_bounds: dict[str, tuple[float, float, int]] = {}
     for line in contract.lines:
         skin = session.get(Skin, line.skin_id)
-        lo = skin.min_float if skin is not None and skin.min_float is not None else line.float_value
-        hi = skin.max_float if skin is not None and skin.max_float is not None else line.float_value
+        lo = skin.min_float if skin is not None and skin.min_float is not None else 0.0
+        hi = skin.max_float if skin is not None and skin.max_float is not None else 1.0
         prev_lo, prev_hi, prev_qty = line_bounds.get(line.skin_id, (lo, hi, 0))
         line_bounds[line.skin_id] = (min(lo, prev_lo), max(hi, prev_hi), prev_qty + line.quantity)
 
@@ -501,21 +517,18 @@ def simulate_ev_curve(session: Session, contract: ContractState, n_samples: int 
     input_price_cache = {skin_id: pricing.latest_prices_by_wear(skin_id) for skin_id in line_bounds}
     output_price_cache = {skin.id: pricing.latest_prices_by_wear(skin.id) for skin, _p, _c in outcome_specs}
 
-    range_lo, range_hi = average_float_achievable_range(session, contract)
-    if range_hi < range_lo:
-        range_lo, range_hi = range_hi, range_lo
     if n_samples <= 1:
-        samples = [range_lo]
+        samples = [0.0]
     else:
-        step = (range_hi - range_lo) / (n_samples - 1)
-        samples = [range_lo + i * step for i in range(n_samples)]
+        step = 1.0 / (n_samples - 1)
+        samples = [i * step for i in range(n_samples)]
 
     points: list[EvCurvePoint] = []
     for x in samples:
         input_cost = 0.0
         for skin_id, (lo, hi, qty) in line_bounds.items():
-            clamped = min(max(x, lo), hi)
-            wear = wear_for_float(clamped)
+            raw_float = output_float(x, lo, hi)
+            wear = wear_for_float(raw_float)
             price_info = input_price_cache[skin_id].get(wear)
             if price_info is not None:
                 price, _observed_at = price_info
@@ -527,7 +540,6 @@ def simulate_ev_curve(session: Session, contract: ContractState, n_samples: int 
             min_out = skin.min_float if skin.min_float is not None else 0.0
             max_out = skin.max_float if skin.max_float is not None else 1.0
             predicted = output_float(x, min_out, max_out)
-            predicted = min(max(predicted, min_out), max_out)
             wear = wear_for_float(predicted)
             price_info = output_price_cache[skin.id].get(wear)
             net_price = 0.0

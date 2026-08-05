@@ -12,11 +12,11 @@ from braindamage.tradeup import (
     ContractLine,
     ContractState,
     average_float,
-    average_float_achievable_range,
     collection_probability,
     cvar,
     eligible_input_skins,
     next_rarity,
+    normalized_float,
     output_float,
     rarity_rank,
     simulate_contract,
@@ -116,18 +116,54 @@ class TestOutputFloat:
         assert output_float(1.0, 0.06, 0.8) == pytest.approx(0.8)
 
 
-class TestAverageFloat:
-    def test_single_line_all_ten(self):
-        assert average_float([_line(0.2, 10)]) == pytest.approx(0.2)
+class TestNormalizedFloat:
+    """The per-skin normalization step trade-ups have used since the
+    2025-10-22 update -- see docs/skin-mechanics.md."""
 
-    def test_weighted_by_quantity(self):
+    def test_matches_p250_supernova_worked_example(self):
+        # Community-documented example: a P250 | Supernova (range 0.00-0.40)
+        # at raw float 0.05 normalizes to 0.125, not 0.05.
+        assert normalized_float(0.05, 0.0, 0.4) == pytest.approx(0.125)
+
+    def test_full_0_1_range_is_the_identity(self):
+        assert normalized_float(0.33, 0.0, 1.0) == pytest.approx(0.33)
+
+    def test_clamps_out_of_range_input(self):
+        assert normalized_float(-1.0, 0.0, 1.0) == pytest.approx(0.0)
+        assert normalized_float(2.0, 0.0, 1.0) == pytest.approx(1.0)
+
+    def test_degenerate_range_returns_zero_not_a_zero_division(self):
+        assert normalized_float(0.5, 0.3, 0.3) == pytest.approx(0.0)
+
+
+class TestAverageFloat:
+    """average_float needs `session` now -- it looks up each line's own skin
+    to normalize against (see TestNormalizedFloat); a missing skin (e.g. the
+    bare skin_id="skin" fixture below, backed by no Skin row) falls back to
+    the full [0, 1] range, where normalization is a no-op."""
+
+    def test_single_line_all_ten(self, session):
+        assert average_float(session, [_line(0.2, 10)]) == pytest.approx(0.2)
+
+    def test_weighted_by_quantity(self, session):
         lines = [_line(0.1, 7), _line(0.5, 3)]
         # (0.1*7 + 0.5*3) / 10 = (0.7 + 1.5) / 10 = 0.22
-        assert average_float(lines) == pytest.approx(0.22)
+        assert average_float(session, lines) == pytest.approx(0.22)
 
-    def test_empty_raises(self):
+    def test_empty_raises(self, session):
         with pytest.raises(ValueError):
-            average_float([])
+            average_float(session, [])
+
+    def test_normalizes_against_each_lines_own_skin_range(self, session):
+        skin = _make_skin(
+            session, id="narrow", name="Narrow", rarity_name="Mil-Spec Grade", min_float=0.0, max_float=0.4
+        )
+        line = ContractLine(
+            skin_id=skin.id, skin_name=skin.name, collection_id="col-a",
+            collection_name="Collection A", float_value=0.05, quantity=10,
+        )
+        # (0.05 - 0.0) / (0.4 - 0.0) = 0.125, same as TestNormalizedFloat above.
+        assert average_float(session, [line]) == pytest.approx(0.125)
 
 
 class TestRarityLadder:
@@ -398,44 +434,6 @@ class TestSimulateContract:
         assert result.outcomes[0].net_price is None
 
 
-class TestAverageFloatAchievableRange:
-    def test_single_skin_matches_its_own_bounds(self, session):
-        skin = _make_skin(session, id="in-1", name="Input", rarity_name="Mil-Spec Grade", min_float=0.1, max_float=0.9)
-        contract = ContractState(
-            rarity_name="Mil-Spec Grade",
-            stattrak=False,
-            lines=[
-                ContractLine(
-                    skin_id=skin.id, skin_name=skin.name, collection_id="col-a",
-                    collection_name="Collection A", float_value=0.5, quantity=10,
-                )
-            ],
-        )
-        assert average_float_achievable_range(session, contract) == pytest.approx((0.1, 0.9))
-
-    def test_weighted_across_distinct_skins(self, session):
-        narrow = _make_skin(session, id="in-1", name="Narrow", rarity_name="Mil-Spec Grade", min_float=0.0, max_float=0.2)
-        wide = _make_skin(session, id="in-2", name="Wide", rarity_name="Mil-Spec Grade", min_float=0.0, max_float=1.0)
-        contract = ContractState(
-            rarity_name="Mil-Spec Grade",
-            stattrak=False,
-            lines=[
-                ContractLine(
-                    skin_id=narrow.id, skin_name=narrow.name, collection_id="col-a",
-                    collection_name="Collection A", float_value=0.1, quantity=7,
-                ),
-                ContractLine(
-                    skin_id=wide.id, skin_name=wide.name, collection_id="col-a",
-                    collection_name="Collection A", float_value=0.1, quantity=3,
-                ),
-            ],
-        )
-        # hi = (7*0.2 + 3*1.0) / 10 = (1.4 + 3.0) / 10 = 0.44
-        lo, hi = average_float_achievable_range(session, contract)
-        assert lo == pytest.approx(0.0)
-        assert hi == pytest.approx(0.44)
-
-
 class TestSimulateEvCurve:
     def _single_line_contract(self, input_skin: Skin) -> ContractState:
         return ContractState(
@@ -507,12 +505,38 @@ class TestSimulateEvCurve:
         assert all(p.input_cost == pytest.approx(0.0) for p in points)
         assert all(p.expected_revenue == pytest.approx(0.0) for p in points)
 
-    def test_uses_each_input_skins_own_float_bounds_not_full_0_1(self, session, signals_dir):
-        input_skin = _make_skin(session, id="input-skin", name="Input Skin", rarity_name="Mil-Spec Grade", min_float=0.2, max_float=0.6)
+    def test_samples_are_normalized_regardless_of_input_skins_own_range(self, session, signals_dir):
+        # Achievable avg_float is always [0, 1] now -- normalization (see
+        # TestNormalizedFloat) makes every skin's own float cap map onto the
+        # same universal scale, unlike the pre-2025-10-22 raw-average formula.
+        input_skin = _make_skin(
+            session, id="input-skin", name="Input Skin", rarity_name="Mil-Spec Grade", min_float=0.2, max_float=0.6
+        )
         _make_skin(session, id="output-skin", name="Output Skin", rarity_name="Restricted", min_float=0.0, max_float=1.0)
         contract = self._single_line_contract(input_skin)
 
         points = simulate_ev_curve(session, contract, n_samples=5)
 
-        assert points[0].avg_float == pytest.approx(0.2)
-        assert points[-1].avg_float == pytest.approx(0.6)
+        assert points[0].avg_float == pytest.approx(0.0)
+        assert points[-1].avg_float == pytest.approx(1.0)
+
+    def test_maps_each_sample_back_through_its_own_input_skins_range(self, session, signals_dir):
+        input_skin = _make_skin(
+            session, id="input-skin", name="Input Skin", rarity_name="Mil-Spec Grade", min_float=0.2, max_float=0.6
+        )
+        _make_skin(session, id="output-skin", name="Output Skin", rarity_name="Restricted", min_float=0.0, max_float=1.0)
+        signals.append_price_observations(
+            input_skin.id,
+            [
+                # avg_float=0.0 -> raw 0.2 (this skin's own min) -> Field-Tested
+                signals.PriceObservationSignal(source="cs2cap", wear_name="Field-Tested", price=7.0, fetched_at=datetime(2026, 1, 1)),
+                # avg_float=1.0 -> raw 0.6 (this skin's own max) -> Battle-Scarred
+                signals.PriceObservationSignal(source="cs2cap", wear_name="Battle-Scarred", price=3.0, fetched_at=datetime(2026, 1, 1)),
+            ],
+        )
+        contract = self._single_line_contract(input_skin)
+
+        points = simulate_ev_curve(session, contract, n_samples=5)
+
+        assert points[0].input_cost == pytest.approx(70.0)  # 10 * $7
+        assert points[-1].input_cost == pytest.approx(30.0)  # 10 * $3

@@ -62,7 +62,7 @@ class EvCurveChart(QChartView):
         y_pad = (y_max - y_min) * 0.08 or 1.0
 
         x_axis = QValueAxis()
-        x_axis.setTitleText("Average input float")
+        x_axis.setTitleText("Average input float (normalized 0-1, per-skin)")
         x_axis.setRange(min(x_values), max(x_values))
         y_axis = QValueAxis()
         y_axis.setTitleText("Expected value ($)")

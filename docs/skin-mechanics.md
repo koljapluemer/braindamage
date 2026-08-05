@@ -75,10 +75,27 @@ Cloudflare), and official Valve patch notes pulled via Steam's
   needed.
 - Output float: `f = x·(y−z) + z`, where `x` = average float of the 10
   inputs, `y`/`z` = the output skin's `max_float`/`min_float`.
+- **`x` is a *normalized* average, not a raw one**, since the same 2025-10-22
+  update below. Each input's raw float is first rescaled against *its own*
+  skin's `[min_float, max_float]` onto a universal 0–1 scale
+  (`normalized = (rawFloat − minFloat) / (maxFloat − minFloat)`) before the
+  10 are averaged; that normalized average is what feeds the `f = x·(y−z) + z`
+  remap above. Before this patch, `x` was the plain (un-normalized) mean raw
+  float — several older calculators and a since-corrected draft of this doc
+  still describe that formula, but it no longer matches live behavior.
+  Verified against SteamDB's CS2 trade-up guide and multiple independent
+  community write-ups (all citing the same worked example: a `P250 |
+  Supernova`, float range 0.00–0.40, at a Factory New raw float of 0.05
+  normalizes to 0.125 — landing an all-0.00–0.40-input contract at Minimal
+  Wear on a full-range output, not Factory New). The Counter-Strike Wiki's
+  own formula page states the remap but not this normalization step
+  explicitly; it points to a community-authored Steam Guide for the full
+  derivation, which does spell it out.
 - **2025-10-22 update**: 5 Covert skins → 1 knife or gloves from a collection
   represented by the inputs; 5 StatTrak Covert → 1 StatTrak knife. Knives and
   gloves themselves still cannot be used as trade-up *inputs* — only produced
-  as this special-cased output.
+  as this special-cased output. The float-normalization change above shipped
+  in this same update, undocumented in the official patch notes.
 - **2026-05-22 update**: Souvenir items can now be selected as trade-up
   inputs, mixable with normal-quality items (not with StatTrak — moot anyway,
   since no StatTrak Souvenir exists). All Souvenir attributes are stripped;
