@@ -11,7 +11,15 @@ from sqlalchemy.orm import Session
 
 from .models import Contract
 from .signals import now_utc
-from .tradeup import ContractState, SimulationResult, cvar, next_rarity, outcome_profits
+from .tradeup import (
+    ContractLine,
+    ContractState,
+    SimulationResult,
+    cvar,
+    next_rarity,
+    outcome_profits,
+    simulate_contract,
+)
 
 
 def contract_id(contract: ContractState) -> str:
@@ -87,3 +95,30 @@ def set_favorite(session: Session, contract_row_id: str, favorite: bool) -> None
         return
     row.favorite = favorite
     session.commit()
+
+
+def state_from_row(contract: Contract) -> ContractState:
+    """Rebuilds the ContractState a persisted `contract` was simulated from --
+    input_lines already stores exactly ContractLine's fields, by construction
+    of upsert_contract above."""
+    return ContractState(
+        rarity_name=contract.rarity_name,
+        stattrak=contract.stattrak,
+        lines=[ContractLine(**line) for line in contract.input_lines],
+    )
+
+
+def referenced_skin_ids(contract: Contract) -> set[str]:
+    """Every skin id `contract` touches, as an input line or a possible
+    output -- what a price-refresh action (Steam, CS2Cap, ...) needs to fetch
+    for one contract."""
+    return {line["skin_id"] for line in contract.input_lines} | {o["skin_id"] for o in contract.outcomes}
+
+
+def resimulate(session: Session, contract: Contract) -> Contract:
+    """Re-runs `contract`'s simulation from whatever prices are currently on
+    disk and upserts the refreshed row -- the shared last step after any
+    price-refresh action has updated this contract's skins' signal files."""
+    state = state_from_row(contract)
+    result = simulate_contract(session, state)
+    return upsert_contract(session, state, result)

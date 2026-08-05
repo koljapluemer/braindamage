@@ -8,13 +8,15 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from . import config, pricing, signals
-from .models import Skin
+from . import config, contracts as contracts_module, pricing, signals
+from .market_names import market_hash_name
+from .models import Contract, Skin
 from .tradeup import WEAR_BUCKETS
 
 BASE_URL = "https://api.cs2c.app/v1"
@@ -78,16 +80,6 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return parsed
 
 
-def _market_hash_name(skin: Skin, wear_name: str) -> str:
-    if skin.stattrak:
-        prefix = "StatTrak™ "
-    elif skin.souvenir:
-        prefix = "Souvenir "
-    else:
-        prefix = ""
-    return f"{prefix}{skin.name} ({wear_name})"
-
-
 def run_price_import(session: Session, skin: Skin, currency: str = "USD") -> PriceImportResult:
     """Fetches current prices for `skin` across every standard wear bucket and
     appends them to its price_observations signal file, then recalculates
@@ -103,9 +95,9 @@ def run_price_import(session: Session, skin: Skin, currency: str = "USD") -> Pri
     error: str | None = None
 
     for wear_name, _lo, _hi in WEAR_BUCKETS:
-        market_hash_name = _market_hash_name(skin, wear_name)
+        name = market_hash_name(skin, wear_name)
         try:
-            response = _fetch_prices(market_hash_name, skin.phase, currency)
+            response = _fetch_prices(name, skin.phase, currency)
         except Cs2capAPIError as exc:
             error = str(exc)
             break
@@ -143,3 +135,49 @@ def run_price_import(session: Session, skin: Skin, currency: str = "USD") -> Pri
         wears_not_found=wears_not_found,
         error=error,
     )
+
+
+@dataclass
+class ContractPriceImportResult:
+    contract_id: str
+    requests_made: int = 0
+    observations: int = 0
+    wears_not_found: int = 0
+    skins_updated: int = 0
+    error: str | None = None
+
+
+def refresh_contract_prices(
+    session: Session,
+    contract: Contract,
+    currency: str = "USD",
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> ContractPriceImportResult:
+    """Parallel to steam_market_api.refresh_contract_prices, but through the
+    CS2Cap API the Maintenance page's "Fetch prices for selected" button
+    already uses: runs run_price_import for every skin `contract` references
+    as an input or a possible output, then re-simulates and upserts
+    `contract` itself so its EV/ROI/CVaR reflect the fresh prices.
+    """
+    skin_ids = contracts_module.referenced_skin_ids(contract)
+    skins = [s for s in (session.get(Skin, sid) for sid in skin_ids) if s is not None]
+    result = ContractPriceImportResult(contract_id=contract.id)
+
+    total = len(skins)
+    for done, skin in enumerate(skins, start=1):
+        skin_result = run_price_import(session, skin, currency)
+        result.requests_made += skin_result.requests_made
+        result.observations += skin_result.observations
+        result.wears_not_found += skin_result.wears_not_found
+        result.skins_updated += 1
+        if skin_result.error and result.error is None:
+            result.error = skin_result.error
+        if on_progress is not None:
+            on_progress(done, total)
+        if skin_result.error:
+            break
+
+    contracts_module.resimulate(session, contract)
+
+    return result
