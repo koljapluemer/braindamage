@@ -302,26 +302,21 @@ def eligible_input_options(session: Session) -> list[SkinOption]:
     return options
 
 
-def simulate_contract(session: Session, contract: ContractState) -> SimulationResult:
-    """Runs a complete, ready (10-input) contract: collection-weighted output
-    probabilities, predicted float/wear per outcome, latest known prices (read
-    from each skin's JSON signals via braindamage.pricing), and EV."""
-    if not contract.is_ready or contract.rarity_name is None:
-        raise ValueError("Contract needs exactly 10 inputs before it can be simulated")
-
-    target_rarity = next_rarity(contract.rarity_name)
-    if target_rarity is None:
-        raise ValueError(f"{contract.rarity_name} has no next rarity tier")
-
+def _resolve_outcome_specs(
+    session: Session, contract: ContractState, target_rarity: str
+) -> tuple[list[tuple[Skin, float, str]], dict[str, str]]:
+    """(skin, probability, collection_id) per eligible specific output for
+    `contract`, plus a collection_id -> collection_name lookup -- the
+    collection-weighted probability structure shared by simulate_contract and
+    simulate_ev_curve (the latter re-prices these same outcomes at many
+    hypothetical average input floats instead of just the contract's actual
+    one)."""
     n_by_collection: dict[str, int] = {}
     collection_names: dict[str, str] = {}
     for line in contract.lines:
         n_by_collection[line.collection_id] = n_by_collection.get(line.collection_id, 0) + line.quantity
         collection_names[line.collection_id] = line.collection_name
 
-    avg_float = average_float(contract.lines)
-
-    # (skin, probability, collection_id) per eligible specific output.
     outcome_specs: list[tuple[Skin, float, str]] = []
     for collection_id, n_c in n_by_collection.items():
         output_query = (
@@ -343,6 +338,23 @@ def simulate_contract(session: Session, contract: ContractState) -> SimulationRe
             )
         probability = collection_probability(n_c, m_c)
         outcome_specs.extend((skin, probability, collection_id) for skin in output_skins)
+
+    return outcome_specs, collection_names
+
+
+def simulate_contract(session: Session, contract: ContractState) -> SimulationResult:
+    """Runs a complete, ready (10-input) contract: collection-weighted output
+    probabilities, predicted float/wear per outcome, latest known prices (read
+    from each skin's JSON signals via braindamage.pricing), and EV."""
+    if not contract.is_ready or contract.rarity_name is None:
+        raise ValueError("Contract needs exactly 10 inputs before it can be simulated")
+
+    target_rarity = next_rarity(contract.rarity_name)
+    if target_rarity is None:
+        raise ValueError(f"{contract.rarity_name} has no next rarity tier")
+
+    avg_float = average_float(contract.lines)
+    outcome_specs, collection_names = _resolve_outcome_specs(session, contract, target_rarity)
 
     resolved: list[tuple[Skin, float, str, str, float]] = []
     for skin, probability, collection_id in outcome_specs:
@@ -406,3 +418,136 @@ def simulate_contract(session: Session, contract: ContractState) -> SimulationRe
         roi=roi,
         missing_output_price_names=missing_output_price_names,
     )
+
+
+# --- EV vs. average input float curve --------------------------------------------
+
+
+@dataclass
+class EvCurvePoint:
+    """One sample of "what would this contract's EV be if its inputs averaged
+    this float instead" -- the contract's actual skin *choices* (and their
+    collection-weighted output probabilities) are held fixed; only the
+    hypothetical average input float varies."""
+
+    avg_float: float
+    input_cost: float
+    expected_revenue: float
+    expected_value: float
+    stdev: float
+
+
+def average_float_achievable_range(session: Session, contract: ContractState) -> tuple[float, float]:
+    """The [lo, hi] band `average_float(contract.lines)` could possibly fall in,
+    given the specific skins (and quantities) already chosen for `contract` --
+    each input line's float is bounded by its own skin's [min_float, max_float],
+    so the quantity-weighted average is bounded by the same weighted average of
+    those per-line bounds. This is what simulate_ev_curve sweeps, not the full
+    [0, 1] range, since floats outside it aren't achievable with this exact
+    contract's inputs."""
+    total_quantity = sum(line.quantity for line in contract.lines)
+    if total_quantity == 0:
+        raise ValueError("Cannot compute an achievable float range for zero inputs")
+
+    weighted_lo = 0.0
+    weighted_hi = 0.0
+    for line in contract.lines:
+        skin = session.get(Skin, line.skin_id)
+        lo = skin.min_float if skin is not None and skin.min_float is not None else line.float_value
+        hi = skin.max_float if skin is not None and skin.max_float is not None else line.float_value
+        weighted_lo += lo * line.quantity
+        weighted_hi += hi * line.quantity
+
+    return weighted_lo / total_quantity, weighted_hi / total_quantity
+
+
+def simulate_ev_curve(session: Session, contract: ContractState, n_samples: int = 100) -> list[EvCurvePoint]:
+    """Samples `n_samples` equally-spaced hypothetical average input floats
+    across `contract`'s achievable range (see average_float_achievable_range),
+    and for each, prices both sides with simple wear-bucket prices rather than
+    per-cent float precision: every input line is priced at the wear bucket its
+    own float range clamps `avg_float` to, and every possible outcome is priced
+    at the wear bucket its predicted_float (via the real output_float formula)
+    falls into. The spread (stdev) of an outcome's possible net prices around
+    the sample's expected revenue is reported per-sample as the curve's error
+    bar, since a single trade-up draws exactly one of many possible outputs.
+
+    This intentionally does *not* use `contract.lines`' actual chosen floats --
+    it's a "what if I sourced this same set of skins at a different average
+    float" curve, independent of the specific float the user picked.
+    """
+    if not contract.is_ready or contract.rarity_name is None:
+        raise ValueError("Contract needs exactly 10 inputs before its EV curve can be simulated")
+
+    target_rarity = next_rarity(contract.rarity_name)
+    if target_rarity is None:
+        raise ValueError(f"{contract.rarity_name} has no next rarity tier")
+
+    # skin_id -> (min_float, max_float, quantity), collapsed across lines sharing
+    # a skin so a repeated skin isn't priced/clamped redundantly per sample.
+    line_bounds: dict[str, tuple[float, float, int]] = {}
+    for line in contract.lines:
+        skin = session.get(Skin, line.skin_id)
+        lo = skin.min_float if skin is not None and skin.min_float is not None else line.float_value
+        hi = skin.max_float if skin is not None and skin.max_float is not None else line.float_value
+        prev_lo, prev_hi, prev_qty = line_bounds.get(line.skin_id, (lo, hi, 0))
+        line_bounds[line.skin_id] = (min(lo, prev_lo), max(hi, prev_hi), prev_qty + line.quantity)
+
+    outcome_specs, _collection_names = _resolve_outcome_specs(session, contract, target_rarity)
+
+    # One signal-file read per referenced skin, reused across every sample --
+    # simulate_contract's per-lookup pricing.latest_price_for_wear would
+    # otherwise re-read (and re-validate) the same JSON files n_samples times.
+    input_price_cache = {skin_id: pricing.latest_prices_by_wear(skin_id) for skin_id in line_bounds}
+    output_price_cache = {skin.id: pricing.latest_prices_by_wear(skin.id) for skin, _p, _c in outcome_specs}
+
+    range_lo, range_hi = average_float_achievable_range(session, contract)
+    if range_hi < range_lo:
+        range_lo, range_hi = range_hi, range_lo
+    if n_samples <= 1:
+        samples = [range_lo]
+    else:
+        step = (range_hi - range_lo) / (n_samples - 1)
+        samples = [range_lo + i * step for i in range(n_samples)]
+
+    points: list[EvCurvePoint] = []
+    for x in samples:
+        input_cost = 0.0
+        for skin_id, (lo, hi, qty) in line_bounds.items():
+            clamped = min(max(x, lo), hi)
+            wear = wear_for_float(clamped)
+            price_info = input_price_cache[skin_id].get(wear)
+            if price_info is not None:
+                price, _observed_at = price_info
+                input_cost += price * qty
+
+        expected_revenue = 0.0
+        weighted_net_prices: list[tuple[float, float]] = []
+        for skin, probability, _collection_id in outcome_specs:
+            min_out = skin.min_float if skin.min_float is not None else 0.0
+            max_out = skin.max_float if skin.max_float is not None else 1.0
+            predicted = output_float(x, min_out, max_out)
+            predicted = min(max(predicted, min_out), max_out)
+            wear = wear_for_float(predicted)
+            price_info = output_price_cache[skin.id].get(wear)
+            net_price = 0.0
+            if price_info is not None:
+                gross_price, _observed_at = price_info
+                net_price = gross_price * (1 - SELL_FEE_RATE)
+            expected_revenue += probability * net_price
+            weighted_net_prices.append((net_price, probability))
+
+        variance = sum(probability * (net_price - expected_revenue) ** 2 for net_price, probability in weighted_net_prices)
+        stdev = variance**0.5
+
+        points.append(
+            EvCurvePoint(
+                avg_float=x,
+                input_cost=input_cost,
+                expected_revenue=expected_revenue,
+                expected_value=expected_revenue - input_cost,
+                stdev=stdev,
+            )
+        )
+
+    return points

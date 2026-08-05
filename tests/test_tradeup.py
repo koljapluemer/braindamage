@@ -12,6 +12,7 @@ from braindamage.tradeup import (
     ContractLine,
     ContractState,
     average_float,
+    average_float_achievable_range,
     collection_probability,
     cvar,
     eligible_input_skins,
@@ -19,6 +20,7 @@ from braindamage.tradeup import (
     output_float,
     rarity_rank,
     simulate_contract,
+    simulate_ev_curve,
     wear_for_float,
 )
 
@@ -226,6 +228,34 @@ class TestPricingSignals:
     def test_latest_price_for_wear_missing_data_returns_none(self, signals_dir):
         assert pricing.latest_price_for_wear("no-such-skin", "Field-Tested") is None
 
+    def test_latest_prices_by_wear_groups_every_wear_from_one_read(self, signals_dir):
+        signals.append_price_observations(
+            "skin-a",
+            [
+                signals.PriceObservationSignal(
+                    source="cs2cap", wear_name="Factory New", price=10.0,
+                    fetched_at=datetime(2026, 1, 1),
+                ),
+                signals.PriceObservationSignal(
+                    source="cs2cap", wear_name="Factory New", price=12.0,
+                    fetched_at=datetime(2026, 1, 2),
+                ),
+                signals.PriceObservationSignal(
+                    source="cs2cap", wear_name="Battle-Scarred", price=3.0,
+                    fetched_at=datetime(2026, 1, 1),
+                ),
+            ],
+        )
+
+        result = pricing.latest_prices_by_wear("skin-a")
+
+        assert set(result.keys()) == {"Factory New", "Battle-Scarred"}
+        assert result["Factory New"] == (12.0, datetime(2026, 1, 2))
+        assert result["Battle-Scarred"] == (3.0, datetime(2026, 1, 1))
+
+    def test_latest_prices_by_wear_missing_data_returns_empty_dict(self, signals_dir):
+        assert pricing.latest_prices_by_wear("no-such-skin") == {}
+
     def test_recalculate_last_price_uses_latest_across_all_wears(self, session, signals_dir):
         skin = _make_skin(session, id="skin-b", name="Test Skin", rarity_name="Restricted")
         signals.append_price_observations(
@@ -366,3 +396,123 @@ class TestSimulateContract:
         assert result.missing_output_price_names == ["Output Skin (Battle-Scarred)"]
         assert result.outcomes[0].gross_price is None
         assert result.outcomes[0].net_price is None
+
+
+class TestAverageFloatAchievableRange:
+    def test_single_skin_matches_its_own_bounds(self, session):
+        skin = _make_skin(session, id="in-1", name="Input", rarity_name="Mil-Spec Grade", min_float=0.1, max_float=0.9)
+        contract = ContractState(
+            rarity_name="Mil-Spec Grade",
+            stattrak=False,
+            lines=[
+                ContractLine(
+                    skin_id=skin.id, skin_name=skin.name, collection_id="col-a",
+                    collection_name="Collection A", float_value=0.5, quantity=10,
+                )
+            ],
+        )
+        assert average_float_achievable_range(session, contract) == pytest.approx((0.1, 0.9))
+
+    def test_weighted_across_distinct_skins(self, session):
+        narrow = _make_skin(session, id="in-1", name="Narrow", rarity_name="Mil-Spec Grade", min_float=0.0, max_float=0.2)
+        wide = _make_skin(session, id="in-2", name="Wide", rarity_name="Mil-Spec Grade", min_float=0.0, max_float=1.0)
+        contract = ContractState(
+            rarity_name="Mil-Spec Grade",
+            stattrak=False,
+            lines=[
+                ContractLine(
+                    skin_id=narrow.id, skin_name=narrow.name, collection_id="col-a",
+                    collection_name="Collection A", float_value=0.1, quantity=7,
+                ),
+                ContractLine(
+                    skin_id=wide.id, skin_name=wide.name, collection_id="col-a",
+                    collection_name="Collection A", float_value=0.1, quantity=3,
+                ),
+            ],
+        )
+        # hi = (7*0.2 + 3*1.0) / 10 = (1.4 + 3.0) / 10 = 0.44
+        lo, hi = average_float_achievable_range(session, contract)
+        assert lo == pytest.approx(0.0)
+        assert hi == pytest.approx(0.44)
+
+
+class TestSimulateEvCurve:
+    def _single_line_contract(self, input_skin: Skin) -> ContractState:
+        return ContractState(
+            rarity_name="Mil-Spec Grade",
+            stattrak=False,
+            lines=[
+                ContractLine(
+                    skin_id=input_skin.id, skin_name=input_skin.name,
+                    collection_id="col-a", collection_name="Collection A",
+                    float_value=0.5, quantity=10,
+                )
+            ],
+        )
+
+    def test_samples_span_the_achievable_range(self, session, signals_dir):
+        input_skin = _make_skin(session, id="input-skin", name="Input Skin", rarity_name="Mil-Spec Grade", min_float=0.0, max_float=1.0)
+        _make_skin(session, id="output-skin", name="Output Skin", rarity_name="Restricted", min_float=0.0, max_float=1.0)
+        contract = self._single_line_contract(input_skin)
+
+        points = simulate_ev_curve(session, contract, n_samples=100)
+
+        assert len(points) == 100
+        assert points[0].avg_float == pytest.approx(0.0)
+        assert points[-1].avg_float == pytest.approx(1.0)
+        # monotonically increasing float samples, equally spaced
+        diffs = [b.avg_float - a.avg_float for a, b in zip(points, points[1:])]
+        assert all(d == pytest.approx(diffs[0]) for d in diffs)
+
+    def test_prices_endpoints_by_wear_bucket(self, session, signals_dir):
+        input_skin = _make_skin(session, id="input-skin", name="Input Skin", rarity_name="Mil-Spec Grade", min_float=0.0, max_float=1.0)
+        output_skin = _make_skin(session, id="output-skin", name="Output Skin", rarity_name="Restricted", min_float=0.0, max_float=1.0)
+        signals.append_price_observations(
+            input_skin.id,
+            [
+                signals.PriceObservationSignal(source="cs2cap", wear_name="Factory New", price=5.0, fetched_at=datetime(2026, 1, 1)),
+                signals.PriceObservationSignal(source="cs2cap", wear_name="Battle-Scarred", price=10.0, fetched_at=datetime(2026, 1, 1)),
+            ],
+        )
+        signals.append_price_observations(
+            output_skin.id,
+            [
+                signals.PriceObservationSignal(source="cs2cap", wear_name="Factory New", price=20.0, fetched_at=datetime(2026, 1, 1)),
+                signals.PriceObservationSignal(source="cs2cap", wear_name="Battle-Scarred", price=50.0, fetched_at=datetime(2026, 1, 1)),
+            ],
+        )
+        contract = self._single_line_contract(input_skin)
+
+        points = simulate_ev_curve(session, contract, n_samples=100)
+
+        fn_point = points[0]  # avg_float == 0.0 -> Factory New both sides
+        assert fn_point.input_cost == pytest.approx(50.0)  # 10 * $5
+        assert fn_point.expected_revenue == pytest.approx(20.0 * 0.85)
+        assert fn_point.expected_value == pytest.approx(20.0 * 0.85 - 50.0)
+        assert fn_point.stdev == pytest.approx(0.0)  # single possible outcome
+
+        bs_point = points[-1]  # avg_float == 1.0 -> Battle-Scarred both sides
+        assert bs_point.input_cost == pytest.approx(100.0)  # 10 * $10
+        assert bs_point.expected_revenue == pytest.approx(50.0 * 0.85)
+        assert bs_point.expected_value == pytest.approx(50.0 * 0.85 - 100.0)
+
+    def test_missing_price_for_a_bucket_contributes_zero_not_an_error(self, session, signals_dir):
+        input_skin = _make_skin(session, id="input-skin", name="Input Skin", rarity_name="Mil-Spec Grade", min_float=0.0, max_float=1.0)
+        _make_skin(session, id="output-skin", name="Output Skin", rarity_name="Restricted", min_float=0.0, max_float=1.0)
+        # No price signals written at all.
+        contract = self._single_line_contract(input_skin)
+
+        points = simulate_ev_curve(session, contract, n_samples=10)
+
+        assert all(p.input_cost == pytest.approx(0.0) for p in points)
+        assert all(p.expected_revenue == pytest.approx(0.0) for p in points)
+
+    def test_uses_each_input_skins_own_float_bounds_not_full_0_1(self, session, signals_dir):
+        input_skin = _make_skin(session, id="input-skin", name="Input Skin", rarity_name="Mil-Spec Grade", min_float=0.2, max_float=0.6)
+        _make_skin(session, id="output-skin", name="Output Skin", rarity_name="Restricted", min_float=0.0, max_float=1.0)
+        contract = self._single_line_contract(input_skin)
+
+        points = simulate_ev_curve(session, contract, n_samples=5)
+
+        assert points[0].avg_float == pytest.approx(0.2)
+        assert points[-1].avg_float == pytest.approx(0.6)

@@ -2,10 +2,10 @@
 Reuses LineTableModel/OutcomeTableModel/ResultSummaryPanel so its rendering
 (including CVaR display) matches the live builder view exactly.
 
-Also owns the two "Fetch prices and recalculate" actions: refetch prices for
-every input/output skin via either Steam's priceoverview endpoint or the
-CS2Cap API (the Maintenance page's single-skin fetch button), then re-simulate
-and re-display this same contract from the refreshed prices.
+Also owns three recalculation actions: refetch prices for every input/output
+skin via either Steam's priceoverview endpoint or the CS2Cap API (the
+Maintenance page's single-skin fetch button), or just re-simulate against
+whatever prices are already on disk -- then re-display this same contract.
 """
 
 from __future__ import annotations
@@ -23,10 +23,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ... import contracts as contracts_module
 from ...db import SessionLocal
 from ...models import Contract
 from ..models.line_table_model import LineTableModel
 from ..models.outcome_table_model import OutcomeTableModel
+from ..widgets.ev_curve_chart import EvCurveChart
 from ..widgets.result_summary_panel import ResultSummaryPanel
 from ..workers.cs2cap_contract_price_worker import Cs2capContractPriceWorker
 from ..workers.signals import keep_alive
@@ -40,9 +42,10 @@ class ContractDetailDialog(QDialog):
         self._contract_id = contract.id
         self._progress: QProgressDialog | None = None
 
-        self.resize(800, 600)
+        self.resize(800, 850)
 
         self._summary = ResultSummaryPanel(self)
+        self._ev_curve_chart = EvCurveChart(self)
 
         self._line_model = LineTableModel(self)
         line_view = QTableView(self)
@@ -69,7 +72,9 @@ class ContractDetailDialog(QDialog):
         self._cs2cap_button.clicked.connect(
             lambda: self._start_fetch(Cs2capContractPriceWorker(self._contract_id), "CS2Cap")
         )
-        self._fetch_buttons = (self._steam_button, self._cs2cap_button)
+        self._recalculate_button = QPushButton("Recalculate (no price fetch)", self)
+        self._recalculate_button.clicked.connect(self._recalculate)
+        self._fetch_buttons = (self._steam_button, self._cs2cap_button, self._recalculate_button)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, self)
         buttons.rejected.connect(self.accept)
@@ -77,6 +82,7 @@ class ContractDetailDialog(QDialog):
         fetch_row = QHBoxLayout()
         fetch_row.addWidget(self._steam_button)
         fetch_row.addWidget(self._cs2cap_button)
+        fetch_row.addWidget(self._recalculate_button)
         fetch_row.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -85,6 +91,7 @@ class ContractDetailDialog(QDialog):
         layout.addWidget(line_view)
         layout.addWidget(QLabel("Outcomes:"))
         layout.addWidget(outcome_view)
+        layout.addWidget(self._ev_curve_chart)
         layout.addLayout(fetch_row)
         layout.addWidget(self._status_label)
         layout.addWidget(buttons)
@@ -105,6 +112,26 @@ class ContractDetailDialog(QDialog):
         )
         self._line_model.set_rows(contract.input_lines)
         self._outcome_model.set_rows(contract.outcomes)
+        self._ev_curve_chart.set_points(contract.ev_curve)
+
+    def _recalculate(self) -> None:
+        """Re-simulates against whatever prices are already on disk -- no
+        network call, unlike the two fetch buttons, so it runs synchronously
+        on the UI thread."""
+        for button in self._fetch_buttons:
+            button.setEnabled(False)
+        self._status_label.setText("")
+        try:
+            with SessionLocal() as session:
+                contract = session.get(Contract, self._contract_id)
+                if contract is None:
+                    return
+                contract = contracts_module.resimulate(session, contract)
+                self._render(contract)
+            self._status_label.setText("Recalculated from existing price data.")
+        finally:
+            for button in self._fetch_buttons:
+                button.setEnabled(True)
 
     def _start_fetch(self, worker, source_label: str) -> None:
         for button in self._fetch_buttons:

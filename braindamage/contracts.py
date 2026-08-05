@@ -19,6 +19,7 @@ from .tradeup import (
     next_rarity,
     outcome_profits,
     simulate_contract,
+    simulate_ev_curve,
 )
 
 
@@ -40,6 +41,21 @@ def upsert_contract(session: Session, contract: ContractState, result: Simulatio
     target_rarity = next_rarity(contract.rarity_name)
     if target_rarity is None:
         raise ValueError(f"{contract.rarity_name} has no next rarity tier")
+
+    # Computed before `row` is touched: simulate_ev_curve issues its own
+    # queries, and running it after row.add()/attribute assignment risks an
+    # autoflush mid-mutation that tries (and NOT-NULL-fails) to insert `row`
+    # before every column is set.
+    ev_curve_points = [
+        {
+            "avg_float": p.avg_float,
+            "input_cost": p.input_cost,
+            "expected_revenue": p.expected_revenue,
+            "expected_value": p.expected_value,
+            "stdev": p.stdev,
+        }
+        for p in simulate_ev_curve(session, contract)
+    ]
 
     row_id = contract_id(contract)
     now = now_utc()
@@ -84,6 +100,7 @@ def upsert_contract(session: Session, contract: ContractState, result: Simulatio
     ]
     row.missing_input_price_names = result.missing_input_price_names
     row.missing_output_price_names = result.missing_output_price_names
+    row.ev_curve = ev_curve_points
 
     session.commit()
     return row

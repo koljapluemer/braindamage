@@ -62,6 +62,11 @@ class Contract(Base):
     so they're stored as JSON (mirroring how the old schema used a JSON `raw`
     column for per-row passthrough data). The scalar fields the contracts list page
     actually sorts/groups by (EV, ROI, CVaR, favorite, timestamps) are real columns.
+
+    `ev_curve` is likewise a snapshot: samples of EV vs. hypothetical average
+    input float (see braindamage.tradeup.simulate_ev_curve), computed once per
+    simulation -- never recomputed ad hoc when the detail view renders -- so the
+    chart there always reflects whatever prices this row was last simulated with.
     """
 
     __tablename__ = "contracts"
@@ -85,3 +90,4 @@ class Contract(Base):
     outcomes: Mapped[list] = mapped_column(JSON, nullable=False)
     missing_input_price_names: Mapped[list] = mapped_column(JSON, nullable=False)
     missing_output_price_names: Mapped[list] = mapped_column(JSON, nullable=False)
+    ev_curve: Mapped[list] = mapped_column(JSON, nullable=False)
