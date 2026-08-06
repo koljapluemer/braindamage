@@ -460,10 +460,13 @@ class EvCurvePoint:
     hypothetical average input float varies."""
 
     avg_float: float
+    raw_avg_float: float
     input_cost: float
     expected_revenue: float
     expected_value: float
     stdev: float
+    worst_profit: float
+    cvar_5pct: float | None
 
 
 def simulate_ev_curve(session: Session, contract: ContractState, n_samples: int = 100) -> list[EvCurvePoint]:
@@ -526,8 +529,10 @@ def simulate_ev_curve(session: Session, contract: ContractState, n_samples: int 
     points: list[EvCurvePoint] = []
     for x in samples:
         input_cost = 0.0
+        raw_float_sum = 0.0
         for skin_id, (lo, hi, qty) in line_bounds.items():
             raw_float = output_float(x, lo, hi)
+            raw_float_sum += raw_float * qty
             wear = wear_for_float(raw_float)
             price_info = input_price_cache[skin_id].get(wear)
             if price_info is not None:
@@ -551,14 +556,22 @@ def simulate_ev_curve(session: Session, contract: ContractState, n_samples: int 
 
         variance = sum(probability * (net_price - expected_revenue) ** 2 for net_price, probability in weighted_net_prices)
         stdev = variance**0.5
+        worst_profit = min((net_price - input_cost for net_price, _probability in weighted_net_prices), default=-input_cost)
+        sample_cvar = cvar(
+            [(net_price - input_cost, probability) for net_price, probability in weighted_net_prices],
+            alpha=0.05,
+        )
 
         points.append(
             EvCurvePoint(
                 avg_float=x,
+                raw_avg_float=raw_float_sum / contract.total_quantity,
                 input_cost=input_cost,
                 expected_revenue=expected_revenue,
                 expected_value=expected_revenue - input_cost,
                 stdev=stdev,
+                worst_profit=worst_profit,
+                cvar_5pct=sample_cvar,
             )
         )
 

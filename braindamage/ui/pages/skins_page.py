@@ -6,7 +6,7 @@ differ.
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QLabel, QTableView, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHeaderView, QLabel, QTableView, QVBoxLayout, QWidget
 
 from ...models import Skin
 from ..models.skin_table_model import SKINS_COLUMNS, SkinTableModel
@@ -30,6 +30,8 @@ class SkinsPage(QWidget):
         self._table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._table.setColumnWidth(0, 320)
 
         self._status_label = QLabel("", self)
 

@@ -131,11 +131,31 @@ class ContractsPage(QWidget):
             return
         with SessionLocal() as session:
             contracts_module.set_favorite(session, contract.id, not contract.favorite)
-        self._reload()
+        contract.favorite = not contract.favorite
+        selected_id = contract.id
+        self._apply_filters()
+        self._restore_selection(selected_id)
+
+    def _restore_selection(self, contract_id: str) -> None:
+        for row in range(self._model.rowCount()):
+            contract = self._model.contract_at(row)
+            if contract is not None and contract.id == contract_id:
+                self._table.selectRow(row)
+                self._table.setFocus()
+                break
 
     def _show_detail(self) -> None:
         contract = self._selected_contract()
         if contract is None:
             return
         dialog = ContractDetailDialog(contract, self)
+        dialog.favoriteChanged.connect(self._on_dialog_favorite_changed)
         dialog.exec()
+
+    def _on_dialog_favorite_changed(self, contract_id: str, favorite: bool) -> None:
+        for contract in self._all_contracts:
+            if contract.id == contract_id:
+                contract.favorite = favorite
+                break
+        self._apply_filters()
+        self._restore_selection(contract_id)

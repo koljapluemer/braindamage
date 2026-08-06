@@ -23,6 +23,46 @@ from .tradeup import (
 )
 
 
+def _optimization_ranges(points: list[dict], limit: int = 3) -> list[dict]:
+    """Collapse adjacent, economically identical curve samples into ranges.
+
+    Prices change at wear boundaries, so EV is piecewise constant.  Grouping
+    those plateaus exposes the useful buying tolerances instead of presenting
+    individual samples as if their precision were meaningful.
+    """
+    if not points:
+        return []
+    groups: list[list[dict]] = []
+    for point in points:
+        signature = (round(point["input_cost"], 8), round(point["expected_revenue"], 8), round(point["stdev"], 8))
+        previous = groups[-1][-1] if groups else None
+        previous_signature = None if previous is None else (
+            round(previous["input_cost"], 8), round(previous["expected_revenue"], 8), round(previous["stdev"], 8)
+        )
+        if signature != previous_signature:
+            groups.append([])
+        groups[-1].append(point)
+
+    ranges = []
+    for group in groups:
+        representative = group[0]
+        revenue = representative["expected_revenue"]
+        cost = representative["input_cost"]
+        ev = representative["expected_value"]
+        ranges.append({
+            "min_float": group[0]["raw_avg_float"],
+            "max_float": group[-1]["raw_avg_float"],
+            "min_normalized_float": group[0]["avg_float"],
+            "max_normalized_float": group[-1]["avg_float"],
+            "expected_price": revenue,
+            "expected_value": ev,
+            "roi": ev / cost if cost > 0 else None,
+            "cvar_5pct": representative["cvar_5pct"],
+            "outcome": "Guaranteed profit" if representative["worst_profit"] >= 0 else "Positive EV" if ev >= 0 else "Negative EV",
+        })
+    return sorted(ranges, key=lambda r: (r["expected_value"], r["roi"] or float("-inf")), reverse=True)[:limit]
+
+
 def contract_id(contract: ContractState) -> str:
     """Deterministic id for a contract's exact composition: same rarity/StatTrak
     and the same (skin, float, quantity) lines, in any order, always hash to the
@@ -46,6 +86,7 @@ def upsert_contract(session: Session, contract: ContractState, result: Simulatio
     # queries, and running it after row.add()/attribute assignment risks an
     # autoflush mid-mutation that tries (and NOT-NULL-fails) to insert `row`
     # before every column is set.
+    curve_samples = simulate_ev_curve(session, contract)
     ev_curve_points = [
         {
             "avg_float": p.avg_float,
@@ -54,8 +95,23 @@ def upsert_contract(session: Session, contract: ContractState, result: Simulatio
             "expected_value": p.expected_value,
             "stdev": p.stdev,
         }
-        for p in simulate_ev_curve(session, contract)
+        for p in curve_samples
     ]
+    ev_curve_annotations = [
+        {"raw_avg_float": p.raw_avg_float, "worst_profit": p.worst_profit}
+        for p in curve_samples
+    ]
+    dense_points = [
+        {
+            "avg_float": p.avg_float, "raw_avg_float": p.raw_avg_float,
+            "input_cost": p.input_cost, "expected_revenue": p.expected_revenue,
+            "expected_value": p.expected_value, "stdev": p.stdev,
+            "worst_profit": p.worst_profit,
+            "cvar_5pct": p.cvar_5pct,
+        }
+        for p in simulate_ev_curve(session, contract, n_samples=1001)
+    ]
+    optimization_ranges = _optimization_ranges(dense_points)
 
     row_id = contract_id(contract)
     now = now_utc()
@@ -67,11 +123,13 @@ def upsert_contract(session: Session, contract: ContractState, result: Simulatio
     row.rarity_name = contract.rarity_name
     row.target_rarity_name = target_rarity
     row.stattrak = contract.stattrak
-    row.input_cost = result.input_cost
-    row.expected_output_value = result.expected_output_value
-    row.expected_value = result.expected_value
-    row.roi = result.roi
-    row.cvar_5pct = cvar(outcome_profits(result), alpha=0.05)
+    complete = not result.missing_input_price_names and not result.missing_output_price_names
+    best = optimization_ranges[0] if optimization_ranges and complete else None
+    row.input_cost = result.input_cost if best is None else best["expected_price"] - best["expected_value"]
+    row.expected_output_value = result.expected_output_value if best is None else best["expected_price"]
+    row.expected_value = result.expected_value if best is None else best["expected_value"]
+    row.roi = result.roi if best is None else best["roi"]
+    row.cvar_5pct = cvar(outcome_profits(result), alpha=0.05) if best is None else best["cvar_5pct"]
     row.last_simulated_at = now
     row.input_lines = [
         {
@@ -101,6 +159,8 @@ def upsert_contract(session: Session, contract: ContractState, result: Simulatio
     row.missing_input_price_names = result.missing_input_price_names
     row.missing_output_price_names = result.missing_output_price_names
     row.ev_curve = ev_curve_points
+    row.ev_curve_annotations = ev_curve_annotations
+    row.optimization_ranges = optimization_ranges
 
     session.commit()
     return row

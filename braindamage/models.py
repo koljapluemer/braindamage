@@ -91,3 +91,5 @@ class Contract(Base):
     missing_input_price_names: Mapped[list] = mapped_column(JSON, nullable=False)
     missing_output_price_names: Mapped[list] = mapped_column(JSON, nullable=False)
     ev_curve: Mapped[list] = mapped_column(JSON, nullable=False)
+    ev_curve_annotations: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    optimization_ranges: Mapped[list] = mapped_column(JSON, nullable=False, default=list)

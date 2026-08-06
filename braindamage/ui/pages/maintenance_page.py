@@ -10,6 +10,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QMessageBox,
@@ -48,6 +49,8 @@ class MaintenancePage(QWidget):
         self._table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         self._table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._table.setColumnWidth(0, 320)
         self._table.selectionModel().selectionChanged.connect(self._on_selection_changed)
 
         self._status_label = QLabel(

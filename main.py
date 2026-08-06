@@ -3,10 +3,12 @@ import sys
 from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import QApplication
 
+from braindamage.db import upgrade_database
 from braindamage.ui.main_window import MainWindow
 
 
 def main() -> None:
+    upgrade_database()
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()

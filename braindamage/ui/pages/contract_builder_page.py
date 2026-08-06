@@ -20,6 +20,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QPushButton,
     QSplitter,
@@ -65,6 +66,8 @@ class ContractBuilderPage(QWidget):
         self._lines_table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         self._lines_table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self._lines_table.horizontalHeader().setStretchLastSection(True)
+        self._lines_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._lines_table.setColumnWidth(0, 280)
         self._lines_table.selectionModel().selectionChanged.connect(self._on_line_selection_changed)
 
         self._add_button = QPushButton("Add input", self)
@@ -116,6 +119,8 @@ class ContractBuilderPage(QWidget):
         self._outcomes_table.setSortingEnabled(True)
         self._outcomes_table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self._outcomes_table.horizontalHeader().setStretchLastSection(True)
+        self._outcomes_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._outcomes_table.setColumnWidth(1, 280)
 
         right = QWidget(self)
         right_layout = QVBoxLayout(right)
