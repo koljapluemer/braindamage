@@ -3,6 +3,18 @@ from __future__ import annotations
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 
 _HEADERS = ["Min float", "Max float", "Expected price", "Outcome", "ROI", "CVaR"]
+_HEADER_TOOLTIPS = [
+    "Lower bound of this buying range: the lowest average input float that still produces the same "
+    "expected outcome and price.",
+    "Upper bound of this buying range: the highest average input float that still produces the same "
+    "expected outcome and price.",
+    "Expected sale revenue (after the Steam sell fee) if your inputs' average float falls in this range.",
+    "Risk classification for this range: 'Guaranteed profit' means every possible outcome outsells the "
+    "input cost; 'Positive/Negative EV' means the average outcome is profitable/unprofitable, but individual "
+    "rolls can still go the other way.",
+    "Expected profit as a percentage of input cost, for this float range.",
+    "Conditional Value at Risk (5%): average profit across the worst 5% of outcomes, for this float range.",
+]
 
 
 class OptimizationRangeTableModel(QAbstractTableModel):
@@ -22,7 +34,13 @@ class OptimizationRangeTableModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(_HEADERS)
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        return _HEADERS[section] if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal else None
+        if orientation != Qt.Orientation.Horizontal:
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
+            return _HEADERS[section]
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return _HEADER_TOOLTIPS[section]
+        return None
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:

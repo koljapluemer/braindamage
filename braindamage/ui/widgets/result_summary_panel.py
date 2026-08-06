@@ -8,19 +8,24 @@ being computed and stored on every simulated Contract.
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QVBoxLayout, QWidget
+
+from ...tradeup import SELL_FEE_RATE
 
 
 class _MetricCard(QFrame):
-    def __init__(self, label: str, parent=None) -> None:
+    def __init__(self, label: str, tooltip: str, parent=None) -> None:
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet("QFrame { border: 1px solid palette(mid); border-radius: 6px; padding: 4px; }")
+        self.setToolTip(tooltip)
+        self.setCursor(Qt.CursorShape.WhatsThisCursor)
 
         self._value_label = QLabel("—")
         self._value_label.setStyleSheet("font-size: 15pt; font-weight: 600; border: none;")
-        caption = QLabel(label)
-        caption.setStyleSheet("color: palette(mid); border: none;")
+        caption = QLabel(f"{label}  ⓘ")
+        caption.setStyleSheet("color: palette(mid); border: none; text-decoration: underline dotted;")
 
         layout = QVBoxLayout(self)
         layout.addWidget(caption)
@@ -33,10 +38,29 @@ class _MetricCard(QFrame):
 class ResultSummaryPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._input_cost = _MetricCard("Input Cost")
-        self._expected_value = _MetricCard("Expected Value")
-        self._roi = _MetricCard("ROI")
-        self._cvar = _MetricCard("CVaR (5%)")
+        fee_pct = f"{SELL_FEE_RATE:.0%}"
+        self._input_cost = _MetricCard(
+            "Input Cost",
+            "Total market cost of the 10 input skins, at current prices for each one's exact wear. "
+            "Does not include Steam's sell fee — that's only charged when you sell an output.",
+        )
+        self._expected_value = _MetricCard(
+            "Expected Value",
+            "Probability-weighted average profit: the sum of every possible outcome's (probability × net sell "
+            f"price after the {fee_pct} Steam fee), minus Input Cost. Positive means the contract is profitable "
+            "on average; it says nothing about how risky any single roll is.",
+        )
+        self._roi = _MetricCard(
+            "ROI",
+            "Return on investment: Expected Value ÷ Input Cost, as a percentage. "
+            "How much profit you'd expect to make relative to what you spent, on average across many rolls.",
+        )
+        self._cvar = _MetricCard(
+            "CVaR (5%)",
+            "Conditional Value at Risk: the average profit across just the worst 5% of possible outcomes "
+            "(weighted by probability). A downside-risk measure — a very negative CVaR means the bad-luck "
+            "rolls are painful even if Expected Value looks fine.",
+        )
 
         self._favorite_label = QLabel("")
         self._warning_label = QLabel("")

@@ -13,6 +13,13 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from ...tradeup import ContractLine, wear_for_float
 
 _HEADERS = ["Skin", "Collection", "Wear", "Float", "Qty"]
+_HEADER_TOOLTIPS = [
+    "Input skin used in this line.",
+    "Skin collection this input belongs to — determines which output skins it can produce.",
+    "Wear condition derived from this input's float value.",
+    "Exact float value of this input skin.",
+    "How many copies of this input are used (a trade-up contract always consumes 10 inputs total).",
+]
 
 
 def line_to_row(line: ContractLine) -> dict:
@@ -46,9 +53,13 @@ class LineTableModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(_HEADERS)
 
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
-        if role != Qt.ItemDataRole.DisplayRole or orientation != Qt.Orientation.Horizontal:
+        if orientation != Qt.Orientation.Horizontal:
             return None
-        return _HEADERS[section]
+        if role == Qt.ItemDataRole.DisplayRole:
+            return _HEADERS[section]
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return _HEADER_TOOLTIPS[section]
+        return None
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:

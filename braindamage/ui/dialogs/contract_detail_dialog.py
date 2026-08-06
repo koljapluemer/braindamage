@@ -123,6 +123,15 @@ class ContractDetailDialog(QDialog):
         fetch_row.addWidget(self._favorite_button)
         fetch_row.addStretch(1)
 
+        ranges_label = QLabel("Best input-float buying ranges:  ⓘ")
+        ranges_label.setToolTip(
+            "This contract's simulated float range collapsed into buying zones that all produce the same "
+            "expected outcome and price. Each row is a [min, max] average-input-float band you could buy "
+            "into and still get the row's Expected price / ROI / CVaR — sorted best first."
+        )
+        ranges_label.setCursor(Qt.CursorShape.WhatsThisCursor)
+        ranges_label.setStyleSheet("text-decoration: underline dotted;")
+
         content = QWidget(self)
         layout = QVBoxLayout(content)
         layout.addWidget(self._summary)
@@ -131,7 +140,7 @@ class ContractDetailDialog(QDialog):
         layout.addWidget(QLabel("Outcomes:"))
         layout.addWidget(outcome_view)
         layout.addWidget(self._ev_curve_chart)
-        layout.addWidget(QLabel("Best input-float buying ranges:"))
+        layout.addWidget(ranges_label)
         layout.addWidget(range_view)
         layout.addLayout(fetch_row)
         layout.addWidget(self._freshness_label)

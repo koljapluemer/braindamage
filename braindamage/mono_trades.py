@@ -65,6 +65,8 @@ def generate_mono_trades(
     max_input_cost: float,
     top_n: int = DEFAULT_TOP_N,
     on_progress: Callable[[int, int], None] | None = None,
+    on_collection_progress: Callable[[int, int], None] | None = None,
+    on_upsert_progress: Callable[[int, int], None] | None = None,
 ) -> list[Contract]:
     """Every collection x tier x StatTrak mono trade (10x the single cheapest
     priced input for that combo) that costs at most `max_input_cost`, ranked by
@@ -73,19 +75,37 @@ def generate_mono_trades(
 
     `on_progress`, if given, is called as `on_progress(done, total)` once per
     (rarity, StatTrak) combo finished — deliberately generic rather than a
-    UI-specific callback, so this module stays UI-framework-agnostic.
+    UI-specific callback, so this module stays UI-framework-agnostic. That's
+    coarse (10 combos total): the actual work happens per-collection inside a
+    combo (`_cheapest_input` reads every candidate skin's price signals off
+    disk) and per-upsert (each kept candidate re-simulates a dense 1001-sample
+    EV curve) -- `on_collection_progress`/`on_upsert_progress`, if given, report
+    those finer-grained totals instead, for callers that want feedback during
+    what's actually the slow part.
     """
     combos = list(itertools.product(tradeup.INPUT_RARITIES, (False, True)))
-    total = len(combos)
+    total_combos = len(combos)
     candidates: list[tuple[tradeup.ContractState, tradeup.SimulationResult]] = []
 
-    for done, (rarity_name, stattrak) in enumerate(combos, start=1):
+    # Collection membership is a cheap DB-only lookup -- resolved for every combo
+    # up front so the total collection count (the real progress denominator) is
+    # known before the expensive per-collection price scanning starts.
+    combo_collections: list[tuple[str, bool, dict[str, list[Skin]]]] = []
+    for rarity_name, stattrak in combos:
         skins_by_collection: dict[str, list[Skin]] = {}
         for skin in tradeup.eligible_input_skins(session, rarity_name, stattrak):
             skins_by_collection.setdefault(skin.collection_id, []).append(skin)
+        combo_collections.append((rarity_name, stattrak, skins_by_collection))
 
+    total_collections = sum(len(skins_by_collection) for _, _, skins_by_collection in combo_collections)
+    collections_done = 0
+
+    for done, (rarity_name, stattrak, skins_by_collection) in enumerate(combo_collections, start=1):
         for collection_skins in skins_by_collection.values():
             cheapest = _cheapest_input(collection_skins)
+            collections_done += 1
+            if on_collection_progress is not None:
+                on_collection_progress(collections_done, total_collections)
             if cheapest is None:
                 continue
             skin, wear_name = cheapest
@@ -109,10 +129,14 @@ def generate_mono_trades(
                 candidates.append((contract, result))
 
         if on_progress is not None:
-            on_progress(done, total)
+            on_progress(done, total_combos)
 
     candidates.sort(key=lambda c: c[1].expected_value, reverse=True)
-    return [
-        contracts_module.upsert_contract(session, contract, result)
-        for contract, result in candidates[:top_n]
-    ]
+    selected = candidates[:top_n]
+    total_upserts = len(selected)
+    results = []
+    for done, (contract, result) in enumerate(selected, start=1):
+        results.append(contracts_module.upsert_contract(session, contract, result))
+        if on_upsert_progress is not None:
+            on_upsert_progress(done, total_upserts)
+    return results

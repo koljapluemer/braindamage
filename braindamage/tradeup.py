@@ -449,6 +449,157 @@ def simulate_contract(session: Session, contract: ContractState) -> SimulationRe
     )
 
 
+# --- Point evaluation at a specific average input float --------------------------
+
+
+@dataclass
+class RangeInputDetail:
+    """What buying `contract`'s input skin looks like at one specific average
+    input float: which wear bucket that lands it in, and what that costs."""
+
+    skin_id: str
+    skin_name: str
+    wear_name: str
+    unit_price: float | None
+    quantity: int
+    line_cost: float | None
+
+
+@dataclass
+class RangeOutcomeDetail:
+    """What one possible output looks like at one specific average input float
+    -- `predicted_float_low`/`_high` are that output's own predicted-float span
+    across the *range* this evaluation represents (constant wear/price
+    throughout, by construction -- see contracts._optimization_ranges -- but the
+    exact float still moves linearly with the average input float within it)."""
+
+    skin_id: str
+    skin_name: str
+    collection_name: str
+    probability: float
+    predicted_wear: str
+    predicted_float_low: float
+    predicted_float_high: float
+    gross_price: float | None
+    net_price: float | None
+    contribution: float
+
+
+@dataclass
+class RangeDetail:
+    inputs: list[RangeInputDetail]
+    outcomes: list[RangeOutcomeDetail]
+    input_cost: float
+    expected_revenue: float
+    expected_value: float
+    worst_profit: float
+    profit_chance: float
+
+
+def evaluate_contract_range(
+    session: Session, contract: ContractState, avg_float_low: float, avg_float_high: float
+) -> RangeDetail:
+    """Full input/outcome breakdown for `contract` at one [avg_float_low,
+    avg_float_high] buying-range plateau (see contracts._optimization_ranges,
+    which groups simulate_ev_curve samples into exactly these ranges because
+    price is piecewise-constant across them) -- wear buckets and prices are
+    read at the range's midpoint (any point strictly inside a plateau gives the
+    same answer, by the plateau's own definition), while each output's
+    predicted-float span is reported across the full [low, high] edges, since
+    that (unlike wear/price) keeps moving linearly within the range.
+
+    Unlike `simulate_contract` (which prices `contract` at its own stored input
+    floats) or `simulate_ev_curve` (which only returns aggregate stats per
+    sample), this answers "what would I actually be buying/getting if I bought
+    into this specific float range" in full detail, at a single point.
+    """
+    if contract.rarity_name is None:
+        raise ValueError("Contract needs a rarity before it can be evaluated")
+    target_rarity = next_rarity(contract.rarity_name)
+    if target_rarity is None:
+        raise ValueError(f"{contract.rarity_name} has no next rarity tier")
+
+    mid_x = (avg_float_low + avg_float_high) / 2
+
+    line_bounds: dict[str, list] = {}
+    for line in contract.lines:
+        skin = session.get(Skin, line.skin_id)
+        lo = skin.min_float if skin is not None and skin.min_float is not None else 0.0
+        hi = skin.max_float if skin is not None and skin.max_float is not None else 1.0
+        entry = line_bounds.get(line.skin_id)
+        if entry is None:
+            line_bounds[line.skin_id] = [lo, hi, line.quantity, line.skin_name]
+        else:
+            entry[0], entry[1], entry[2] = min(entry[0], lo), max(entry[1], hi), entry[2] + line.quantity
+
+    inputs: list[RangeInputDetail] = []
+    input_cost = 0.0
+    for skin_id, (lo, hi, qty, skin_name) in line_bounds.items():
+        raw_float = output_float(mid_x, lo, hi)
+        wear = wear_for_float(raw_float)
+        price_info = pricing.latest_price_for_wear(skin_id, wear)
+        unit_price = price_info[0] if price_info is not None else None
+        line_cost = unit_price * qty if unit_price is not None else None
+        if line_cost is not None:
+            input_cost += line_cost
+        inputs.append(RangeInputDetail(skin_id, skin_name, wear, unit_price, qty, line_cost))
+
+    outcome_specs, collection_names = _resolve_outcome_specs(session, contract, target_rarity)
+
+    outcomes: list[RangeOutcomeDetail] = []
+    expected_revenue = 0.0
+    for skin, probability, collection_id in outcome_specs:
+        min_out = skin.min_float if skin.min_float is not None else 0.0
+        max_out = skin.max_float if skin.max_float is not None else 1.0
+        f_low = min(max(output_float(avg_float_low, min_out, max_out), min_out), max_out)
+        f_high = min(max(output_float(avg_float_high, min_out, max_out), min_out), max_out)
+        f_mid = min(max(output_float(mid_x, min_out, max_out), min_out), max_out)
+        wear = wear_for_float(f_mid)
+        price_info = pricing.latest_price_for_wear(skin.id, wear)
+        if price_info is not None:
+            gross, _observed_at = price_info
+            net = gross * (1 - SELL_FEE_RATE)
+            contribution = probability * net
+            expected_revenue += contribution
+        else:
+            gross = None
+            net = None
+            contribution = 0.0
+        outcomes.append(
+            RangeOutcomeDetail(
+                skin_id=skin.id,
+                skin_name=skin.name,
+                collection_name=collection_names[collection_id],
+                probability=probability,
+                predicted_wear=wear,
+                predicted_float_low=min(f_low, f_high),
+                predicted_float_high=max(f_low, f_high),
+                gross_price=gross,
+                net_price=net,
+                contribution=contribution,
+            )
+        )
+
+    outcomes.sort(key=lambda o: o.probability, reverse=True)
+    expected_value = expected_revenue - input_cost
+    worst_profit = min(
+        ((o.net_price if o.net_price is not None else 0.0) - input_cost for o in outcomes), default=-input_cost
+    )
+    profit_chance = sum(
+        o.probability for o in outcomes if (o.net_price if o.net_price is not None else 0.0) - input_cost > 0
+    )
+
+    return RangeDetail(
+        inputs=inputs,
+        outcomes=outcomes,
+        input_cost=input_cost,
+        expected_revenue=expected_revenue,
+        expected_value=expected_value,
+        worst_profit=worst_profit,
+        profit_chance=profit_chance,
+    )
+
+
 # --- EV vs. average input float curve --------------------------------------------
 
 

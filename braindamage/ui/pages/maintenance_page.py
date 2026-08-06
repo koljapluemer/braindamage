@@ -21,11 +21,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ... import config
 from ...models import Skin
 from ...tradeup import INPUT_RARITIES
 from ..models.skin_table_model import MAINTENANCE_COLUMNS, SkinTableModel
 from ..skin_dataset import filter_skins, load_skins
 from ..widgets.search_filter_bar import SearchFilterBar
+from ..workers.bulk_price_fetch_worker import BulkPriceFetchWorker
 from ..workers.mono_trade_worker import MonoTradeWorker
 from ..workers.price_fetch_worker import PriceFetchWorker
 from ..workers.signals import keep_alive
@@ -67,6 +69,12 @@ class MaintenancePage(QWidget):
         buttons_row = QHBoxLayout()
         buttons_row.addWidget(self._fetch_button)
         buttons_row.addWidget(self._mono_button)
+
+        if config.CS2CAP_PREMIUM_TIER:
+            self._bulk_fetch_button = QPushButton("Refetch all skin prices…", self)
+            self._bulk_fetch_button.clicked.connect(self._bulk_fetch_prices)
+            buttons_row.addWidget(self._bulk_fetch_button)
+
         buttons_row.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -153,3 +161,47 @@ class MaintenancePage(QWidget):
     def _on_mono_error(self, progress: QProgressDialog, message: str) -> None:
         progress.close()
         QMessageBox.warning(self, "Mono trades", f"Failed to generate mono trades: {message}")
+
+    def _bulk_fetch_prices(self) -> None:
+        confirmed = QMessageBox.question(
+            self,
+            "Refetch all skin prices",
+            "This refetches prices for every normal and StatTrak skin via the CS2Cap "
+            "batch API -- roughly 100 requests, taking a few minutes. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+
+        progress = QProgressDialog("Refetching all skin prices…", "", 0, 1, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.setValue(0)
+
+        worker = BulkPriceFetchWorker()
+        keep_alive(self._inflight, worker)
+        worker.signals.progress.connect(lambda done, total: self._on_bulk_fetch_progress(progress, done, total))
+        worker.signals.finished.connect(lambda result: self._on_bulk_fetch_finished(progress, result))
+        worker.signals.error.connect(lambda message: self._on_bulk_fetch_error(progress, message))
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_bulk_fetch_progress(self, progress: QProgressDialog, done: int, total: int) -> None:
+        progress.setMaximum(total)
+        progress.setValue(done)
+        progress.setLabelText(f"Refetching all skin prices... (batch {done}/{total})")
+
+    def _on_bulk_fetch_finished(self, progress: QProgressDialog, result: object) -> None:
+        progress.close()
+        message = (
+            f"Refetched {result.skins_processed} skins: {result.observations} observations "
+            f"({result.requests_made} requests, {result.wears_not_found} wears not found)"
+        )
+        if result.error:
+            message += f" — stopped early: {result.error}"
+        QMessageBox.information(self, "Refetch all skin prices", message)
+        self._search_bar.load(load_skins)  # refresh cached prices/timestamps
+
+    def _on_bulk_fetch_error(self, progress: QProgressDialog, message: str) -> None:
+        progress.close()
+        QMessageBox.warning(self, "Refetch all skin prices", f"Failed: {message}")

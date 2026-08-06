@@ -1,3 +1,3 @@
 - Do not run the UI yourself. Leave tasks that needs eyes and hands to the dev.
-- It is VERY easy to get weird state issues in streamlit. Make STRICT UI statemachines, and follow official recommendations to the letter.
 - Do not do ANY git write operations of ANY kind, ever!
+- Follow QT and python data processing guidelines and patterns.
