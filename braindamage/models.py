@@ -93,3 +93,13 @@ class Contract(Base):
     ev_curve: Mapped[list] = mapped_column(JSON, nullable=False)
     ev_curve_annotations: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     optimization_ranges: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    # CSFloat postvalidation (braindamage.postvalidate) -- per optimization_ranges
+    # entry, whether enough real floated listings actually exist to buy the 10
+    # inputs in that band right now and what that really costs. Only the
+    # genuinely ephemeral facts are stored here (a point-in-time listing
+    # snapshot can't be recomputed later); expected value/revenue are always
+    # rederived fresh from this plus the live-updated output price signals
+    # (see report._repriced_with_real_cost), never cached.
+    postvalidated_ranges: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    postvalidated_at: Mapped[datetime | None] = mapped_column(DateTime)

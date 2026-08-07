@@ -13,3 +13,8 @@ CS2CAP_API_KEY = os.environ.get("CS2CAP_API_KEY")
 # itself has no way to report a key's tier (GET /account/key returns rate
 # limit/quota numbers but no plan name), so this has to be set by hand.
 CS2CAP_PREMIUM_TIER = os.environ.get("CS2CAP_PREMIUM_TIER", "").strip().lower() in ("1", "true", "yes")
+
+# CSFloat (https://docs.csfloat.com) -- free with a CSFloat account, no tier
+# gating. Used only for postvalidation (braindamage.postvalidate): CS2Cap
+# never sees individual floated listings, only wear-tier aggregates.
+CSFLOAT_API_KEY = os.environ.get("CSFLOAT_API_KEY")

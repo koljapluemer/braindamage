@@ -12,7 +12,7 @@ once in a browser and read, not served or kept interactive.
 from __future__ import annotations
 
 import html
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -401,6 +401,84 @@ def evaluate_ranges(contract: Contract, session: Session):
     ]
 
 
+# --- CSFloat postvalidation (braindamage.postvalidate) -------------------------
+
+# A mono trade-up always needs exactly 10 of its single input skin (see
+# tradeup.ContractState.is_ready / postvalidate.REQUIRED_INPUT_LISTINGS) --
+# not imported directly to avoid a report<->postvalidate circular import.
+_REQUIRED_INPUT_LISTINGS = 10
+
+_FLOAT_MATCH_TOLERANCE = 1e-9
+
+
+def _repriced_with_real_cost(detail, real_input_cost: float):
+    """A RangeDetail with input_cost/expected_value/worst_profit/profit_chance
+    replaced by CSFloat-postvalidated real numbers -- the same formulas
+    tradeup.evaluate_contract_range itself uses to derive those from input
+    cost, just fed a real summed cost (from actual distinct floated listings)
+    instead of unit_price x quantity. detail.outcomes/expected_revenue are
+    left as-is: `detail` is always a fresh evaluate_ranges() result here, so
+    they already reflect postvalidation's live CSFloat output-price refresh."""
+    worst_profit = min(
+        ((o.net_price if o.net_price is not None else 0.0) - real_input_cost for o in detail.outcomes),
+        default=-real_input_cost,
+    )
+    profit_chance = sum(
+        o.probability
+        for o in detail.outcomes
+        if (o.net_price if o.net_price is not None else 0.0) - real_input_cost > 0
+    )
+    return replace(
+        detail,
+        input_cost=real_input_cost,
+        expected_value=detail.expected_revenue - real_input_cost,
+        worst_profit=worst_profit,
+        profit_chance=profit_chance,
+    )
+
+
+def _apply_postvalidation(range_evals: list, postvalidated_ranges: list[dict]) -> list:
+    """Drops any range CSFloat postvalidation found unexecutable (fewer than
+    10 real listings in that float band) or that comes out negative-EV on
+    real numbers, and reprices every surviving range's headline stats with
+    its real input cost (see _repriced_with_real_cost) -- requirement (a) of
+    postvalidation filtering. A surviving range's dict also carries its
+    matched postvalidation entry under the "postvalidation" key, so
+    _range_breakdown can render the verification line. Ranges with no
+    matching postvalidation entry at all (shouldn't happen -- postvalidate_
+    contract evaluates exactly contract.optimization_ranges) are dropped
+    rather than trusted."""
+    by_bounds = {(pv["min_float"], pv["max_float"]): pv for pv in postvalidated_ranges}
+    result = []
+    for r, detail in range_evals:
+        match = None
+        for (lo, hi), pv in by_bounds.items():
+            if abs(lo - r["min_float"]) < _FLOAT_MATCH_TOLERANCE and abs(hi - r["max_float"]) < _FLOAT_MATCH_TOLERANCE:
+                match = pv
+                break
+        if match is None or not match["executable"] or match["real_input_cost"] is None:
+            continue
+        repriced = _repriced_with_real_cost(detail, match["real_input_cost"])
+        if repriced.expected_value < 0:
+            continue
+        result.append(({**r, "postvalidation": match}, repriced))
+    return result
+
+
+def filter_postvalidated(selection: Selection, session: Session) -> Selection:
+    """Drops contracts left with zero executable, non-negative-EV buying
+    ranges after CSFloat postvalidation -- requirement (b). Call once, right
+    after postvalidate.postvalidate_contracts has run, before render_report.
+    A contract never postvalidated at all (empty postvalidated_ranges) is
+    dropped too -- there's nothing confirming it's still promising."""
+    surviving = [
+        c
+        for c in selection.contracts
+        if c.postvalidated_ranges and _apply_postvalidation(evaluate_ranges(c, session), c.postvalidated_ranges)
+    ]
+    return replace(selection, contracts=surviving)
+
+
 def _range_breakdown(range_evals: list) -> str:
     """Detailed, self-consistent stats per buying-float range: for each range,
     what wear you're buying the input at and what it costs, and for every
@@ -428,6 +506,14 @@ def _range_breakdown(range_evals: list) -> str:
             "The [min, max] average-input-float band that all produces this same expected outcome and "
             "price — see the EV chart above for the full curve this range was collapsed from.",
         )
+        verification = ""
+        pv = r.get("postvalidation")
+        if pv is not None:
+            verification = (
+                '<p class="verified">✓ Verified via CSFloat: '
+                f"{pv['listings_found']}/{_REQUIRED_INPUT_LISTINGS} real floated listings found in this "
+                f"range, totaling {_money(pv['real_input_cost'])} actual cost (checked {_esc(pv['checked_at'])})</p>"
+            )
         sections.append(
             f'<div class="range-section">'
             f'<p class="range-heading"><span class="range-badge">{_esc(label)}</span> '
@@ -440,6 +526,7 @@ def _range_breakdown(range_evals: list) -> str:
             f" &nbsp;·&nbsp; Chance of profit {detail.profit_chance:.1%}"
             f" &nbsp;·&nbsp; Worst case <span class='{'bad' if detail.worst_profit < 0 else 'good'}'>{_money(detail.worst_profit, signed=True)}</span>"
             "</p>"
+            f"{verification}"
             f"{_range_input_table(detail)}"
             f"{_range_outcomes_table(detail)}"
             "</div>"
@@ -457,7 +544,9 @@ def _metric_card(label: str, tooltip: str, value: str, css_class: str = "") -> s
     )
 
 
-def _contract_card(contract: Contract, session: Session, in_ev_top: bool, in_net_top: bool) -> str:
+def _contract_card(
+    contract: Contract, session: Session, in_ev_top: bool, in_net_top: bool, *, postvalidated: bool = False
+) -> str:
     input_skin_id = contract.input_lines[0]["skin_id"] if contract.input_lines else None
     input_skin = session.get(Skin, input_skin_id) if input_skin_id else None
 
@@ -474,6 +563,8 @@ def _contract_card(contract: Contract, session: Session, in_ev_top: bool, in_net
     # snapshot with a fresh one is exactly how you get a contract that claims
     # +130% EV and 0% chance of profit in the same breath.
     range_evals = evaluate_ranges(contract, session)
+    if postvalidated and contract.postvalidated_ranges:
+        range_evals = _apply_postvalidation(range_evals, contract.postvalidated_ranges)
     has_range_data = bool(range_evals)
 
     if has_range_data:
@@ -524,6 +615,8 @@ def _contract_card(contract: Contract, session: Session, in_ev_top: bool, in_net
         badges.append('<span class="tag tag-net">Top 10 net $</span>')
     if cvar_5pct is not None and cvar_5pct > 0:
         badges.append('<span class="tag tag-cvar">CVaR+</span>')
+    if postvalidated and has_range_data:
+        badges.append('<span class="tag tag-verified">✓ CSFloat-verified</span>')
 
     warning = ""
     if incomplete:
@@ -744,11 +837,13 @@ header.report-header p { margin: 2px 0; color: var(--ink-secondary); font-size: 
 .tag-ev { background: var(--tag-ev-bg); color: var(--good); border: none; }
 .tag-net { background: var(--tag-net-bg); color: #2a78d6; border: none; }
 .tag-cvar { background: var(--tag-cvar-bg); color: var(--ev-guaranteed); border: none; }
+.tag-verified { background: var(--tag-net-bg); color: var(--good); border: none; }
 
 .contract-body { padding: 4px 16px 16px; border-top: 1px solid var(--border); }
 .subhead { color: var(--ink-secondary); font-size: 0.88rem; }
 .note { color: var(--muted); font-size: 0.8rem; font-style: italic; margin: 4px 0; }
 .warning { color: var(--warning); font-size: 0.88rem; }
+.verified { color: var(--good); font-size: 0.8rem; margin: 0 0 8px; }
 
 .metrics-grid {
   display: grid;
@@ -813,7 +908,9 @@ footer { margin-top: 24px; color: var(--muted); font-size: 0.8rem; }
 """
 
 
-def render_report(selection: Selection, session: Session, *, max_input_cost: float) -> str:
+def render_report(
+    selection: Selection, session: Session, *, max_input_cost: float, postvalidated: bool = False
+) -> str:
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     top_ev_ids = {c.id for c in sorted(
@@ -824,11 +921,26 @@ def render_report(selection: Selection, session: Session, *, max_input_cost: flo
     ]}
 
     cards = "".join(
-        _contract_card(c, session, c.id in top_ev_ids, c.id in top_net_ids) for c in selection.contracts
+        _contract_card(c, session, c.id in top_ev_ids, c.id in top_net_ids, postvalidated=postvalidated)
+        for c in selection.contracts
     )
 
     if not selection.contracts:
         cards = '<p class="muted">No contracts matched — try raising --max-input-cost, or check that skins have priced signals.</p>'
+
+    postvalidation_note = (
+        "<p>Buying-range and output prices below were live-checked against CSFloat — ranges that turned out "
+        "unexecutable or negative-EV on real numbers, and contracts left with none, have already been "
+        "dropped.</p>"
+        if postvalidated
+        else ""
+    )
+    footer_note = (
+        "Buying-range input costs and output prices reflect a live CSFloat check performed when this report "
+        "was generated; everything else is whatever was already on disk."
+        if postvalidated
+        else "Prices are whatever was already on disk when this report was generated — no live price fetch was performed."
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -845,11 +957,11 @@ def render_report(selection: Selection, session: Session, *, max_input_cost: flo
 <p>{selection.total_generated} mono trade(s) simulated under budget → {len(selection.contracts)} shown below:
 top {selection.top_ev_pct_count} by EV%, top {selection.top_net_win_count} by net win $, and
 {selection.positive_cvar_count} with positive CVaR (5%) — overlap deduplicated, sorted by EV% descending.</p>
-</header>
+{postvalidation_note}</header>
 <main>
 {cards}
 </main>
-<footer>Prices are whatever was already on disk when this report was generated — no live price fetch was performed.</footer>
+<footer>{footer_note}</footer>
 </div>
 </body>
 </html>

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from . import mono_trades, report
+from . import config, mono_trades, postvalidate, report
 from .db import DATA_DIR, SessionLocal, upgrade_database
 
 REPORTS_DIR = DATA_DIR / "reports"
@@ -49,6 +49,14 @@ class _TqdmProgress:
         if done >= total:
             self._bar.close()
 
+    def close(self) -> None:
+        """For a caller that may stop early (e.g. postvalidate_contracts'
+        circuit breakers) and so never hits the done >= total close above --
+        safe to call even if the bar already closed itself or was never
+        created at all."""
+        if self._bar is not None:
+            self._bar.close()
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -69,6 +77,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write the report but don't launch Firefox.",
     )
+    parser.add_argument(
+        "--postvalidate-csfloat",
+        action="store_true",
+        help=(
+            "After shortlisting, check each contract's buying-float ranges against CSFloat's live "
+            "floated listings: real cost (and whether it's even possible) to buy the 10 inputs in "
+            "that exact float range right now, plus a live lowest-ask refresh for every possible "
+            "output. Ranges that are unexecutable or negative-EV on real numbers are dropped from "
+            "the report; contracts left with no viable range are dropped entirely. Writes to the "
+            "same on-disk price signals and DB rows every other price-fetch action uses. Requires "
+            "CSFLOAT_API_KEY in .env. Slow: multiple CSFloat requests per buying range, per "
+            "shortlisted contract."
+        ),
+    )
     return parser
 
 
@@ -83,6 +105,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.max_input_cost <= 0:
         print("--max-input-cost must be positive", file=sys.stderr)
+        return 2
+    if args.postvalidate_csfloat and not config.CSFLOAT_API_KEY:
+        print("--postvalidate-csfloat requires CSFLOAT_API_KEY in .env", file=sys.stderr)
         return 2
 
     upgrade_database()
@@ -104,7 +129,51 @@ def main(argv: list[str] | None = None) -> int:
             f"Shortlisted {len(selection.contracts)}: top {selection.top_ev_pct_count} by EV%, "
             f"top {selection.top_net_win_count} by net win $, {selection.positive_cvar_count} with positive CVaR."
         )
-        html = report.render_report(selection, session, max_input_cost=args.max_input_cost)
+
+        postvalidated = False
+        if args.postvalidate_csfloat:
+            print(f"Postvalidating {len(selection.contracts)} contract(s) against CSFloat...")
+            pre_postvalidation_selection = selection
+            progress = _TqdmProgress("Postvalidating", "contract")
+            try:
+                results = postvalidate.postvalidate_contracts(
+                    session, selection.contracts, on_progress=progress
+                )
+                errored = [r for r in results if r.error is not None]
+                if errored:
+                    print(
+                        f"{len(errored)}/{len(results)} contract(s) hit an error partway through "
+                        "postvalidation (most likely CSFloat rate limiting) -- whatever ranges they'd "
+                        "already checked are kept; unchecked ranges are treated as unconfirmed.",
+                        file=sys.stderr,
+                    )
+                if len(results) < len(selection.contracts):
+                    print(
+                        f"Only {len(results)}/{len(selection.contracts)} shortlisted contract(s) were "
+                        "attempted -- a circuit breaker stopped the rest early (see message above); "
+                        "the untouched ones are excluded below rather than shown unconfirmed.",
+                        file=sys.stderr,
+                    )
+                selection = report.filter_postvalidated(selection, session)
+                postvalidated = True
+                print(f"{len(selection.contracts)} contract(s) remain after postvalidation.")
+            except Exception as exc:  # noqa: BLE001 -- last line of defense, see below
+                # Whatever went wrong here, the simulation work above (which can take
+                # many minutes) must not be thrown away -- fall back to the
+                # pre-postvalidation selection and still write a report from it,
+                # rather than crash with nothing written at all.
+                print(
+                    f"Postvalidation failed entirely ({exc}) -- writing the report without it instead of "
+                    "discarding the simulation above.",
+                    file=sys.stderr,
+                )
+                selection = pre_postvalidation_selection
+            finally:
+                progress.close()
+
+        html = report.render_report(
+            selection, session, max_input_cost=args.max_input_cost, postvalidated=postvalidated
+        )
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     report_path = REPORTS_DIR / f"mono-trades-{timestamp}.html"

@@ -60,6 +60,28 @@ class AggregatedPriceSignal(BaseModel):
     volume: int | None = None
 
 
+class MarketOfferSignal(BaseModel):
+    """One individual, currently-live floated marketplace listing observed for
+    a skin -- unlike PriceObservationSignal (one point-in-time price for a
+    whole wear bucket), this captures a single buyable listing's own exact
+    float and price. Written by braindamage.postvalidate when it checks
+    whether enough real listings exist within a specific float sub-range to
+    actually execute a trade-up's buying plan. Append-only, and kept purely as
+    a historical record for later float-vs-price correlation analysis --
+    braindamage.pricing never reads this file back."""
+
+    source: str
+    listing_id: str
+    market_hash_name: str
+    wear_name: str | None = None
+    float_value: float | None = None
+    price: float
+    currency: str = "USD"
+    listing_type: str
+    fetched_at: datetime
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
 class SkinEvent(BaseModel):
     """Reserved for future non-price signals (Valve announcements, streamer
     callouts, etc.). The shape is intentionally minimal — no writer exists yet."""
@@ -73,10 +95,12 @@ class SkinEvent(BaseModel):
 
 _PRICE_OBSERVATIONS_FILE = "price_observations.json"
 _AGGREGATED_PRICES_FILE = "aggregated_prices.json"
+_MARKET_OFFERS_FILE = "market_offers.json"
 _EVENTS_FILE = "events.json"
 
 _price_observations_adapter = TypeAdapter(list[PriceObservationSignal])
 _aggregated_prices_adapter = TypeAdapter(list[AggregatedPriceSignal])
+_market_offers_adapter = TypeAdapter(list[MarketOfferSignal])
 _events_adapter = TypeAdapter(list[SkinEvent])
 
 
@@ -115,6 +139,18 @@ def append_aggregated_prices(skin_id: str, new_prices: list[AggregatedPriceSigna
     existing = read_aggregated_prices(skin_id)
     existing.extend(new_prices)
     _write(skin_id, _AGGREGATED_PRICES_FILE, _aggregated_prices_adapter, existing)
+
+
+def read_market_offers(skin_id: str) -> list[MarketOfferSignal]:
+    return _read(skin_id, _MARKET_OFFERS_FILE, _market_offers_adapter)
+
+
+def append_market_offers(skin_id: str, new_offers: list[MarketOfferSignal]) -> None:
+    if not new_offers:
+        return
+    existing = read_market_offers(skin_id)
+    existing.extend(new_offers)
+    _write(skin_id, _MARKET_OFFERS_FILE, _market_offers_adapter, existing)
 
 
 def read_events(skin_id: str) -> list[SkinEvent]:

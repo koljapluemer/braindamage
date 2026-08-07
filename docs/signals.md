@@ -12,6 +12,7 @@ a new file and a new Pydantic model — never a migration.
 data/skins/<skin_id>/
     price_observations.json   # point-in-time price readings
     aggregated_prices.json    # OHLC-style hourly buckets (bulk historical import)
+    market_offers.json         # individual live floated listings (CSFloat postvalidation)
     events.json                # reserved for future signals (Valve announcements,
                                 # streamer callouts, etc.) — no writer exists yet
 ```
@@ -19,7 +20,18 @@ data/skins/<skin_id>/
 One file per **kind**, not one combined blob per skin: each write stays small, and
 each kind is independently typed (see the Pydantic models in
 `braindamage/signals.py`: `PriceObservationSignal`, `AggregatedPriceSignal`,
-`SkinEvent`). Entries are append-only — never edited or removed.
+`MarketOfferSignal`, `SkinEvent`). Entries are append-only — never edited or removed.
+
+`market_offers.json` is written by `braindamage.postvalidate` (see
+docs/skin-mechanics.md or the module docstring) when it checks a trade-up's
+buying-float range against CSFloat's real, individually-floated listings — one
+entry per listing observed, kept as a historical record for later
+float-vs-price correlation analysis. Unlike the other two price-signal kinds,
+it is never read back by `braindamage.pricing` — a per-listing float snapshot
+doesn't fit "latest price for this wear" resolution, it's audit trail only.
+CSFloat's *lowest ask* per wear bucket, by contrast, is written as an ordinary
+`PriceObservationSignal(source="csfloat", ...)` and does flow through the
+normal pricing machinery.
 
 ## Why `Skin` doesn't split by wear
 
