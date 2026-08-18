@@ -156,6 +156,15 @@ summary ("N requests to buy at $X or lower") and saves it to
 available *sell-side* signal, an instant sale with no listing needed) for
 every outcome skin it has one for.
 
+The sidebar's UI is a Vue 3 app styled with Tailwind, both vendored locally
+under `webext/vendor/` (no CDN fetch at runtime, no build step to install
+the extension). If you're editing the sidebar's markup, note that it's kept
+in `webext/sidebar.template.html`, not inline in `sidebar.js` — Steam's page
+CSP blocks the `eval` Vue's runtime compiler needs, so the template is
+precompiled offline into `webext/sidebar.render.generated.js`
+(`cd webext/scripts && npm install && node build.js` after editing the
+template; see that file's header comment for the full story).
+
 Two things worth knowing:
 - **Your Steam account currency must be USD or EUR.** This app assumes USD
   everywhere downstream (pricing, EV math); a EUR scrape is converted to USD

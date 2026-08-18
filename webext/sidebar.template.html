@@ -1,0 +1,176 @@
+<!--
+  SidebarApp's Vue template -- the source of truth for the sidebar's markup.
+
+  This is NOT loaded at runtime. Steam's page CSP blocks `unsafe-eval`, and
+  Vue's runtime template compiler turns a template string into a render
+  function via `new Function(...)`, so a plain `template: \`...\`` (what a
+  no-build-step Vue setup normally does) throws "EvalError: call to
+  Function() blocked by CSP" the moment the component tries to render.
+
+  Instead this file is precompiled OFFLINE (compilation itself needs eval,
+  just not in the browser) into a plain render() function function, which
+  has no eval/Function() in it at all -- see webext/scripts/build.js.
+  webext/vendor/vue.runtime.global.prod.js (no compiler, so no eval at all,
+  which is also a smaller download) is loaded instead of the full
+  vue.global.prod.js build for the same reason.
+
+  After editing this file, regenerate the compiled output:
+    cd webext/scripts && npm install && node build.js
+  That overwrites webext/sidebar.render.generated.js, which manifest.json
+  loads as a content script ahead of sidebar.js. Never hand-edit that
+  generated file -- it won't match this source next time someone runs
+  build.js, and it's unreadable enough that hand-patching it is a bad time.
+-->
+      <div v-show="sidebar.is('collapsed')"
+           @click="toggleSidebar"
+           title="Open braindamage sidebar"
+           class="w-[26px] h-full bg-[#1b2838] text-[#c7d5e0] border-l border-white/15 flex items-center justify-center cursor-pointer select-none tracking-wide py-2.5 hover:bg-[#24374c]"
+           style="writing-mode: vertical-rl; text-orientation: mixed;">
+        braindamage
+      </div>
+
+      <div v-show="sidebar.is('expanded')"
+           class="block w-fit max-w-[min(920px,92vw)] max-h-full overflow-auto bg-[#171a21] text-[#c7d5e0] border-l border-white/15 shadow-[-6px_0_16px_rgba(0,0,0,0.45)] p-2.5 px-3">
+
+        <div class="flex items-center gap-2 whitespace-nowrap">
+          <strong class="flex-1 text-[#66c0f4] text-[13px]">braindamage</strong>
+          <button type="button" :class="btnClass" :disabled="fetchFsm.is('loading')" @click="refresh">Refresh</button>
+          <button type="button" :class="btnClass" :disabled="contractFsm.is('loading')" @click="construct"
+                  title="Run the buy combo search on just what's visible on this page right now">
+            Construct Contract
+          </button>
+          <button type="button" :class="btnClass" title="Collapse" @click="toggleSidebar">&raquo;</button>
+        </div>
+
+        <div class="mt-2 whitespace-pre-wrap text-[11px] min-h-[1em]"
+             :class="{ 'text-[#6fd06f]': fetchFsm.is('ready'), 'text-[#ff6b6b]': fetchFsm.is('error') }">
+          {{ fetchStatus }}
+        </div>
+
+        <div v-if="table" class="mt-2.5 overflow-x-auto">
+          <table :class="tableClass">
+            <thead>
+              <tr>
+                <th :class="thClass + ' text-left'">Wear</th>
+                <th :class="thClass">
+                  <a :href="table.input_header.steam_url" target="_blank" rel="noopener noreferrer" class="text-[#66c0f4] no-underline hover:underline">
+                    {{ table.input_header.skin_name }}
+                  </a>
+                </th>
+                <th v-for="header in table.outcome_headers" :key="header.skin_id" :class="thClass">
+                  <a :href="header.steam_url" target="_blank" rel="noopener noreferrer" class="text-[#66c0f4] no-underline hover:underline">
+                    {{ header.skin_name }}
+                  </a>
+                </th>
+                <th :class="thClass">EV</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in table.rows" :key="row.wear_name">
+                <td :class="tdClass + ' text-left'">{{ row.wear_name }}</td>
+                <td :class="[tdClass, priceCellClass(row.input_cell)]">{{ fmtMoney(row.input_cell.value) }}</td>
+                <td v-for="(cell, i) in row.outcome_cells" :key="i" :class="[tdClass, priceCellClass(cell)]">
+                  {{ fmtMoney(cell.value) }}
+                </td>
+                <td :class="[tdClass, priceCellClass(row.ev_cell), 'font-bold']">{{ fmtMoney(row.ev_cell.value) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="mt-2.5">
+          <div v-if="contractFsm.is('idle', 'loading', 'error')" class="whitespace-pre-wrap text-[11px]"
+               :class="{ 'text-[#ff6b6b]': contractFsm.is('error') }">
+            {{ contractStatus }}
+          </div>
+
+          <div v-else-if="contract">
+            <div class="flex items-center gap-2 flex-wrap text-[13px]">
+              <strong>{{ contract.stattrak ? 'StatTrak™ ' + contract.skin_name : contract.skin_name }}</strong>
+              <span class="text-[#8f98a0] font-normal">— {{ contract.collection_name }} [{{ contract.rarity_name }}]</span>
+              <span class="ml-auto font-bold" :class="contract.expected_value >= 0 ? 'text-[#6fd06f]' : 'text-[#ff6b6b]'">
+                EV {{ fmtMoney(contract.expected_value) }}
+              </span>
+            </div>
+
+            <div class="flex gap-4 flex-wrap mt-2 mb-1">
+              <div class="flex flex-col">
+                <span class="text-[#8f98a0] text-[10px]">Real cost (10 listings)</span>
+                <span>{{ fmtMoney(contract.real_cost) }}</span>
+              </div>
+              <div class="flex flex-col">
+                <span class="text-[#8f98a0] text-[10px]">Expected output value</span>
+                <span>{{ fmtMoney(contract.expected_output_value) }}</span>
+              </div>
+              <div class="flex flex-col">
+                <span class="text-[#8f98a0] text-[10px]">ROI</span>
+                <span>{{ contract.roi === null ? '—' : fmtPct(contract.roi) }}</span>
+              </div>
+              <div class="flex flex-col">
+                <span class="text-[#8f98a0] text-[10px]">Avg. normalized float</span>
+                <span>{{ contract.avg_float.toFixed(4) }}</span>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2 my-2">
+              <button type="button" :class="btnClass" @click="focusContractOffer(contractIndex - 1)">&lsaquo; Prev</button>
+              <span class="tabular-nums">{{ contractIndex + 1 }} / {{ contractOffers.length }}</span>
+              <button type="button" :class="btnClass" @click="focusContractOffer(contractIndex + 1)">Next &rsaquo;</button>
+            </div>
+
+            <h3 class="text-[11px] uppercase tracking-wide text-[#8f98a0] mt-3 mb-1">The 10 listings to buy</h3>
+            <table :class="tableClass">
+              <thead>
+                <tr>
+                  <th :class="thClass">Wear</th>
+                  <th :class="thClass">Float</th>
+                  <th :class="thClass">Pattern</th>
+                  <th :class="thClass">Price</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(entry, i) in contractOffers" :key="i"
+                    class="cursor-pointer hover:bg-[#66c0f4]/15"
+                    :class="{ 'opacity-60': !entry.element }"
+                    @click="focusContractOffer(i)">
+                  <td :class="tdClass">{{ entry.offer.wear_name || '—' }}</td>
+                  <td :class="tdClass">{{ entry.offer.float_value.toFixed(6) }}</td>
+                  <td :class="tdClass">{{ entry.offer.pattern_seed === null || entry.offer.pattern_seed === undefined ? '—' : entry.offer.pattern_seed }}</td>
+                  <td :class="tdClass">{{ fmtMoney(entry.offer.price) }}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h3 class="text-[11px] uppercase tracking-wide text-[#8f98a0] mt-3 mb-1">Possible outputs</h3>
+            <table :class="tableClass">
+              <thead>
+                <tr>
+                  <th :class="thClass">Output</th>
+                  <th :class="thClass">Collection</th>
+                  <th :class="thClass">Chance</th>
+                  <th :class="thClass">Wear</th>
+                  <th :class="thClass">Net sell</th>
+                  <th :class="thClass">Contribution</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(outcome, i) in contract.outcomes" :key="i">
+                  <td :class="tdClass">{{ outcome.skin_name }}</td>
+                  <td :class="tdClass">{{ outcome.collection_name }}</td>
+                  <td :class="tdClass">{{ fmtPct(outcome.probability) }}</td>
+                  <td :class="tdClass">{{ outcome.predicted_wear }}</td>
+                  <td :class="tdClass">{{ fmtMoney(outcome.net_price) }}</td>
+                  <td :class="tdClass">{{ fmtMoney(outcome.contribution) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div v-if="contractHistory.length" class="mt-2.5">
+          <h3 class="text-[11px] uppercase tracking-wide text-[#8f98a0] mt-3 mb-1">Contract history</h3>
+          <div v-for="(entry, i) in contractHistory" :key="i" class="text-[11px] whitespace-nowrap">
+            {{ fmtDate(entry.generated_at) }}: Generated contract with EV {{ fmtMoney(entry.expected_value) }} for float {{ entry.raw_avg_float.toFixed(4) }}
+          </div>
+        </div>
+      </div>

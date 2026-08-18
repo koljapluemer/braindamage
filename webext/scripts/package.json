@@ -1,0 +1,11 @@
+{
+  "name": "braindamage-webext-build",
+  "private": true,
+  "description": "Dev-only tool: compiles webext/sidebar.template.html into webext/sidebar.render.generated.js. Not part of the shipped extension -- nothing here is loaded by manifest.json.",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "@vue/compiler-dom": "3.5.41"
+  }
+}
