@@ -26,7 +26,7 @@ from typing import Any, BinaryIO
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import config, mono_trade_table, offer_combos, signals
+from . import config, mono_trade_overview, mono_trade_table, offer_combos, signals
 from .db import SessionLocal, upgrade_database
 from .market_names import parse_market_hash_name
 from .models import Skin
@@ -336,6 +336,17 @@ def handle_construct_contract(session: Session, payload: dict[str, Any]) -> dict
     }
 
 
+def handle_overview_chunk(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    """Build one independently measurable rarity/StatTrak overview batch."""
+    rarity = payload.get("rarity_name")
+    stattrak = payload.get("stattrak")
+    if rarity not in mono_trade_overview.tradeup.INPUT_RARITIES or not isinstance(stattrak, bool):
+        return {"ok": False, "error": "Invalid overview batch"}
+    return mono_trade_overview.build_overview(
+        session, rarities=[rarity], stattrak_values=[stattrak]
+    )
+
+
 # Action names the sidebar's payload carries in its "action" field --
 # "fetch_offers" (the default, for payloads with none, e.g. from before this
 # field existed) is the always-on scrape+table refresh; "construct_contract"
@@ -344,6 +355,8 @@ def handle_construct_contract(session: Session, payload: dict[str, Any]) -> dict
 _HANDLERS = {
     "fetch_offers": handle_fetch_offers,
     "construct_contract": handle_construct_contract,
+    "overview": lambda session, _payload: mono_trade_overview.build_overview(session),
+    "overview_chunk": handle_overview_chunk,
 }
 
 

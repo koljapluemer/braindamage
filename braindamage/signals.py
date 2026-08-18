@@ -136,6 +136,20 @@ class ContractHistorySignal(BaseModel):
     generated_at: datetime
 
 
+class LegacyWearPrice(BaseModel):
+    """One latest legacy price retained by the one-time overview snapshot."""
+
+    price: float
+    observed_at: datetime
+
+
+class LegacyPriceSnapshot(BaseModel):
+    """Compact replacement for scanning a skin's full legacy price history."""
+
+    generated_at: datetime
+    prices_by_wear: dict[str, LegacyWearPrice] = Field(default_factory=dict)
+
+
 class SkinEvent(BaseModel):
     """Reserved for future non-price signals (Valve announcements, streamer
     callouts, etc.). The shape is intentionally minimal — no writer exists yet."""
@@ -153,6 +167,7 @@ _MARKET_OFFERS_FILE = "market_offers.json"
 _STEAM_OFFERS_FILE = "steam_offers.json"
 _BUY_ORDER_SUMMARY_FILE = "buy_order_summary.json"
 _CONTRACT_HISTORY_FILE = "contract_history.json"
+_LEGACY_PRICE_SNAPSHOT_FILE = "legacy_latest_prices.json"
 _EVENTS_FILE = "events.json"
 
 _price_observations_adapter = TypeAdapter(list[PriceObservationSignal])
@@ -161,6 +176,7 @@ _market_offers_adapter = TypeAdapter(list[MarketOfferSignal])
 _steam_offers_adapter = TypeAdapter(list[SteamOfferSignal])
 _buy_order_summary_adapter = TypeAdapter(list[BuyOrderSummarySignal])
 _contract_history_adapter = TypeAdapter(list[ContractHistorySignal])
+_legacy_price_snapshot_adapter = TypeAdapter(LegacyPriceSnapshot)
 _events_adapter = TypeAdapter(list[SkinEvent])
 
 
@@ -247,6 +263,20 @@ def append_contract_history(skin_id: str, new_entries: list[ContractHistorySigna
     existing = read_contract_history(skin_id)
     existing.extend(new_entries)
     _write(skin_id, _CONTRACT_HISTORY_FILE, _contract_history_adapter, existing)
+
+
+def read_legacy_price_snapshot(skin_id: str) -> LegacyPriceSnapshot | None:
+    path = SKINS_DIR / skin_id / _LEGACY_PRICE_SNAPSHOT_FILE
+    if not path.exists():
+        return None
+    return _legacy_price_snapshot_adapter.validate_json(path.read_text(encoding="utf-8"))
+
+
+def write_legacy_price_snapshot(skin_id: str, snapshot: LegacyPriceSnapshot) -> None:
+    skin_dir = SKINS_DIR / skin_id
+    skin_dir.mkdir(parents=True, exist_ok=True)
+    path = skin_dir / _LEGACY_PRICE_SNAPSHOT_FILE
+    path.write_bytes(_legacy_price_snapshot_adapter.dump_json(snapshot, indent=2))
 
 
 def read_events(skin_id: str) -> list[SkinEvent]:

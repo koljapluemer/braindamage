@@ -488,6 +488,7 @@
 
       return {
         sidebar,
+        openOverview: () => browser.runtime.sendMessage({ type: "openOverview" }),
         toggleSidebar: () => sidebar.send("toggle"),
         fetchFsm,
         fetchStatus,

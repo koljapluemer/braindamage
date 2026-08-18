@@ -9,30 +9,31 @@ window.__bdSidebarRender = (function () {
   const _hoisted_1 = ["onClick"]
   const _hoisted_2 = { class: "block w-fit max-w-[min(920px,92vw)] max-h-full overflow-auto bg-[#171a21] text-[#c7d5e0] border-l border-white/15 shadow-[-6px_0_16px_rgba(0,0,0,0.45)] p-2.5 px-3" }
   const _hoisted_3 = { class: "flex items-center gap-2 whitespace-nowrap" }
-  const _hoisted_4 = ["disabled", "onClick"]
+  const _hoisted_4 = ["onClick"]
   const _hoisted_5 = ["disabled", "onClick"]
-  const _hoisted_6 = ["onClick"]
-  const _hoisted_7 = {
+  const _hoisted_6 = ["disabled", "onClick"]
+  const _hoisted_7 = ["onClick"]
+  const _hoisted_8 = {
     key: 0,
     class: "mt-2.5 overflow-x-auto"
   }
-  const _hoisted_8 = ["href"]
   const _hoisted_9 = ["href"]
-  const _hoisted_10 = { class: "mt-2.5" }
-  const _hoisted_11 = { key: 1 }
-  const _hoisted_12 = { class: "flex items-center gap-2 flex-wrap text-[13px]" }
-  const _hoisted_13 = { class: "text-[#8f98a0] font-normal" }
-  const _hoisted_14 = { class: "flex gap-4 flex-wrap mt-2 mb-1" }
-  const _hoisted_15 = { class: "flex flex-col" }
+  const _hoisted_10 = ["href"]
+  const _hoisted_11 = { class: "mt-2.5" }
+  const _hoisted_12 = { key: 1 }
+  const _hoisted_13 = { class: "flex items-center gap-2 flex-wrap text-[13px]" }
+  const _hoisted_14 = { class: "text-[#8f98a0] font-normal" }
+  const _hoisted_15 = { class: "flex gap-4 flex-wrap mt-2 mb-1" }
   const _hoisted_16 = { class: "flex flex-col" }
   const _hoisted_17 = { class: "flex flex-col" }
   const _hoisted_18 = { class: "flex flex-col" }
-  const _hoisted_19 = { class: "flex items-center gap-2 my-2" }
-  const _hoisted_20 = ["onClick"]
-  const _hoisted_21 = { class: "tabular-nums" }
-  const _hoisted_22 = ["onClick"]
+  const _hoisted_19 = { class: "flex flex-col" }
+  const _hoisted_20 = { class: "flex items-center gap-2 my-2" }
+  const _hoisted_21 = ["onClick"]
+  const _hoisted_22 = { class: "tabular-nums" }
   const _hoisted_23 = ["onClick"]
-  const _hoisted_24 = {
+  const _hoisted_24 = ["onClick"]
+  const _hoisted_25 = {
     key: 1,
     class: "mt-2.5"
   }
@@ -56,28 +57,33 @@ window.__bdSidebarRender = (function () {
             _createElementVNode("button", {
               type: "button",
               class: _normalizeClass(btnClass),
+              onClick: openOverview
+            }, "Overview", 10 /* CLASS, PROPS */, _hoisted_4),
+            _createElementVNode("button", {
+              type: "button",
+              class: _normalizeClass(btnClass),
               disabled: fetchFsm.is('loading'),
               onClick: refresh
-            }, "Refresh", 10 /* CLASS, PROPS */, _hoisted_4),
+            }, "Refresh", 10 /* CLASS, PROPS */, _hoisted_5),
             _createElementVNode("button", {
               type: "button",
               class: _normalizeClass(btnClass),
               disabled: contractFsm.is('loading'),
               onClick: construct,
               title: "Run the buy combo search on just what's visible on this page right now"
-            }, " Construct Contract ", 10 /* CLASS, PROPS */, _hoisted_5),
+            }, " Construct Contract ", 10 /* CLASS, PROPS */, _hoisted_6),
             _createElementVNode("button", {
               type: "button",
               class: _normalizeClass(btnClass),
               title: "Collapse",
               onClick: toggleSidebar
-            }, "»", 10 /* CLASS, PROPS */, _hoisted_6)
+            }, "»", 10 /* CLASS, PROPS */, _hoisted_7)
           ]),
           _createElementVNode("div", {
             class: _normalizeClass(["mt-2 whitespace-pre-wrap text-[11px] min-h-[1em]", { 'text-[#6fd06f]': fetchFsm.is('ready'), 'text-[#ff6b6b]': fetchFsm.is('error') }])
           }, _toDisplayString(fetchStatus), 3 /* TEXT, CLASS */),
           table
-            ? (_openBlock(), _createElementBlock("div", _hoisted_7, [
+            ? (_openBlock(), _createElementBlock("div", _hoisted_8, [
                 _createElementVNode("table", {
                   class: _normalizeClass(tableClass)
                 }, [
@@ -94,7 +100,7 @@ window.__bdSidebarRender = (function () {
                           target: "_blank",
                           rel: "noopener noreferrer",
                           class: "text-[#66c0f4] no-underline hover:underline"
-                        }, _toDisplayString(table.input_header.skin_name), 9 /* TEXT, PROPS */, _hoisted_8)
+                        }, _toDisplayString(table.input_header.skin_name), 9 /* TEXT, PROPS */, _hoisted_9)
                       ], 2 /* CLASS */),
                       (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(table.outcome_headers, (header) => {
                         return (_openBlock(), _createElementBlock("th", {
@@ -106,7 +112,7 @@ window.__bdSidebarRender = (function () {
                             target: "_blank",
                             rel: "noopener noreferrer",
                             class: "text-[#66c0f4] no-underline hover:underline"
-                          }, _toDisplayString(header.skin_name), 9 /* TEXT, PROPS */, _hoisted_9)
+                          }, _toDisplayString(header.skin_name), 9 /* TEXT, PROPS */, _hoisted_10)
                         ], 2 /* CLASS */))
                       }), 128 /* KEYED_FRAGMENT */)),
                       _createElementVNode("th", {
@@ -138,51 +144,51 @@ window.__bdSidebarRender = (function () {
                 ], 2 /* CLASS */)
               ]))
             : _createCommentVNode("v-if", true),
-          _createElementVNode("div", _hoisted_10, [
+          _createElementVNode("div", _hoisted_11, [
             (contractFsm.is('idle', 'loading', 'error'))
               ? (_openBlock(), _createElementBlock("div", {
                   key: 0,
                   class: _normalizeClass(["whitespace-pre-wrap text-[11px]", { 'text-[#ff6b6b]': contractFsm.is('error') }])
                 }, _toDisplayString(contractStatus), 3 /* TEXT, CLASS */))
               : contract
-                ? (_openBlock(), _createElementBlock("div", _hoisted_11, [
-                    _createElementVNode("div", _hoisted_12, [
+                ? (_openBlock(), _createElementBlock("div", _hoisted_12, [
+                    _createElementVNode("div", _hoisted_13, [
                       _createElementVNode("strong", null, _toDisplayString(contract.stattrak ? 'StatTrak™ ' + contract.skin_name : contract.skin_name), 1 /* TEXT */),
-                      _createElementVNode("span", _hoisted_13, "— " + _toDisplayString(contract.collection_name) + " [" + _toDisplayString(contract.rarity_name) + "]", 1 /* TEXT */),
+                      _createElementVNode("span", _hoisted_14, "— " + _toDisplayString(contract.collection_name) + " [" + _toDisplayString(contract.rarity_name) + "]", 1 /* TEXT */),
                       _createElementVNode("span", {
                         class: _normalizeClass(["ml-auto font-bold", contract.expected_value >= 0 ? 'text-[#6fd06f]' : 'text-[#ff6b6b]'])
                       }, " EV " + _toDisplayString(fmtMoney(contract.expected_value)), 3 /* TEXT, CLASS */)
                     ]),
-                    _createElementVNode("div", _hoisted_14, [
-                      _createElementVNode("div", _hoisted_15, [
+                    _createElementVNode("div", _hoisted_15, [
+                      _createElementVNode("div", _hoisted_16, [
                         _cache[1] || (_cache[1] = _createElementVNode("span", { class: "text-[#8f98a0] text-[10px]" }, "Real cost (10 listings)", -1 /* CACHED */)),
                         _createElementVNode("span", null, _toDisplayString(fmtMoney(contract.real_cost)), 1 /* TEXT */)
                       ]),
-                      _createElementVNode("div", _hoisted_16, [
+                      _createElementVNode("div", _hoisted_17, [
                         _cache[2] || (_cache[2] = _createElementVNode("span", { class: "text-[#8f98a0] text-[10px]" }, "Expected output value", -1 /* CACHED */)),
                         _createElementVNode("span", null, _toDisplayString(fmtMoney(contract.expected_output_value)), 1 /* TEXT */)
                       ]),
-                      _createElementVNode("div", _hoisted_17, [
+                      _createElementVNode("div", _hoisted_18, [
                         _cache[3] || (_cache[3] = _createElementVNode("span", { class: "text-[#8f98a0] text-[10px]" }, "ROI", -1 /* CACHED */)),
                         _createElementVNode("span", null, _toDisplayString(contract.roi === null ? '—' : fmtPct(contract.roi)), 1 /* TEXT */)
                       ]),
-                      _createElementVNode("div", _hoisted_18, [
+                      _createElementVNode("div", _hoisted_19, [
                         _cache[4] || (_cache[4] = _createElementVNode("span", { class: "text-[#8f98a0] text-[10px]" }, "Avg. normalized float", -1 /* CACHED */)),
                         _createElementVNode("span", null, _toDisplayString(contract.avg_float.toFixed(4)), 1 /* TEXT */)
                       ])
                     ]),
-                    _createElementVNode("div", _hoisted_19, [
+                    _createElementVNode("div", _hoisted_20, [
                       _createElementVNode("button", {
                         type: "button",
                         class: _normalizeClass(btnClass),
                         onClick: $event => (focusContractOffer(contractIndex - 1))
-                      }, "‹ Prev", 10 /* CLASS, PROPS */, _hoisted_20),
-                      _createElementVNode("span", _hoisted_21, _toDisplayString(contractIndex + 1) + " / " + _toDisplayString(contractOffers.length), 1 /* TEXT */),
+                      }, "‹ Prev", 10 /* CLASS, PROPS */, _hoisted_21),
+                      _createElementVNode("span", _hoisted_22, _toDisplayString(contractIndex + 1) + " / " + _toDisplayString(contractOffers.length), 1 /* TEXT */),
                       _createElementVNode("button", {
                         type: "button",
                         class: _normalizeClass(btnClass),
                         onClick: $event => (focusContractOffer(contractIndex + 1))
-                      }, "Next ›", 10 /* CLASS, PROPS */, _hoisted_22)
+                      }, "Next ›", 10 /* CLASS, PROPS */, _hoisted_23)
                     ]),
                     _cache[5] || (_cache[5] = _createElementVNode("h3", { class: "text-[11px] uppercase tracking-wide text-[#8f98a0] mt-3 mb-1" }, "The 10 listings to buy", -1 /* CACHED */)),
                     _createElementVNode("table", {
@@ -223,7 +229,7 @@ window.__bdSidebarRender = (function () {
                             _createElementVNode("td", {
                               class: _normalizeClass(tdClass)
                             }, _toDisplayString(fmtMoney(entry.offer.price)), 3 /* TEXT, CLASS */)
-                          ], 10 /* CLASS, PROPS */, _hoisted_23))
+                          ], 10 /* CLASS, PROPS */, _hoisted_24))
                         }), 128 /* KEYED_FRAGMENT */))
                       ])
                     ], 2 /* CLASS */),
@@ -282,7 +288,7 @@ window.__bdSidebarRender = (function () {
                 : _createCommentVNode("v-if", true)
           ]),
           (contractHistory.length)
-            ? (_openBlock(), _createElementBlock("div", _hoisted_24, [
+            ? (_openBlock(), _createElementBlock("div", _hoisted_25, [
                 _cache[7] || (_cache[7] = _createElementVNode("h3", { class: "text-[11px] uppercase tracking-wide text-[#8f98a0] mt-3 mb-1" }, "Contract history", -1 /* CACHED */)),
                 (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(contractHistory, (entry, i) => {
                   return (_openBlock(), _createElementBlock("div", {

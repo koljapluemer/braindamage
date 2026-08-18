@@ -98,7 +98,11 @@ def _cheapest_ten_cost(skin_id: str, wear_name: str) -> tuple[float, datetime] |
     return sum(o.price for o in cheapest), min(o.fetched_at for o in cheapest)
 
 
-def _outcome_price_cell(skin_id: str, wear_name: str) -> dict:
+def _outcome_price_cell(
+    skin_id: str,
+    wear_name: str,
+    legacy_prices: dict[str, tuple[float, datetime]] | None = None,
+) -> dict:
     """The best available NET sell-side price for one outcome skin at one
     wear -- what you'd actually walk away with fulfilling that price on
     Steam Community Market right now, after Steam's real per-sale fee (see
@@ -113,14 +117,23 @@ def _outcome_price_cell(skin_id: str, wear_name: str) -> dict:
         price, fetched_at, _num_orders = buy_order
         return {"value": steam_fees.net_proceeds(price), "color": _age_color(fetched_at), "source": "buy_order"}
 
-    price_info = pricing.latest_price_for_wear(skin_id, wear_name)
+    price_info = (
+        legacy_prices.get(wear_name)
+        if legacy_prices is not None
+        else pricing.latest_price_for_wear(skin_id, wear_name)
+    )
     if price_info is None:
         return {"value": None, "color": None, "source": None}
     price, _observed_at = price_info
     return {"value": steam_fees.net_proceeds(price), "color": "grey", "source": "fallback"}
 
 
-def build_table(session: Session, skin: Skin) -> dict:
+def build_table(
+    session: Session,
+    skin: Skin,
+    *,
+    legacy_prices_by_skin: dict[str, dict[str, tuple[float, datetime]]] | None = None,
+) -> dict:
     """The full sidebar table for `skin`: one row per wear tier, with `skin`'s
     own buy-10-cost, every possible mono-trade outcome's price, and a
     per-row EV. Raises MonoTradeTableError if `skin` isn't a valid trade-up
@@ -163,7 +176,14 @@ def build_table(session: Session, skin: Skin) -> dict:
             total, oldest = cost
             input_cell = {"value": total, "color": _age_color(oldest)}
 
-        outcome_cells = [_outcome_price_cell(o.id, wear_name) for o in outcome_skins]
+        outcome_cells = [
+            _outcome_price_cell(
+                o.id,
+                wear_name,
+                legacy_prices_by_skin.get(o.id, {}) if legacy_prices_by_skin is not None else None,
+            )
+            for o in outcome_skins
+        ]
 
         if input_cell["value"] is None:
             ev_cell = {"value": None}

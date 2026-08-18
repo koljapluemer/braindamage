@@ -5,9 +5,13 @@
 
 const NATIVE_HOST = "braindamage_steam_offers";
 
-const RELAYED_MESSAGE_TYPES = ["fetchOffers", "constructContract"];
+const RELAYED_MESSAGE_TYPES = ["fetchOffers", "constructContract", "fetchOverview"];
 
 browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message && message.type === "openOverview") {
+    browser.tabs.create({ url: browser.runtime.getURL("overview.html") });
+    return undefined;
+  }
   if (!message || !RELAYED_MESSAGE_TYPES.includes(message.type)) return undefined;
 
   browser.runtime

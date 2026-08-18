@@ -1,0 +1,18 @@
+:root { color-scheme: dark; font: 13px/1.55 system-ui, sans-serif; background: #171a21; color: #c7d5e0; }
+body { margin: 0; }
+main { max-width: 1100px; margin: 28px auto; padding: 0 20px; }
+h1 { color: #66c0f4; font-size: 18px; margin: 0 0 16px; }
+#status { color: #8f98a0; }
+#progress { height: 6px; margin: 0 0 18px; overflow: hidden; background: #2a475e; border-radius: 3px; }
+#progress-fill { width: 0; height: 100%; background: #66c0f4; transition: width 160ms ease-out; }
+.trade { display: flex; align-items: baseline; gap: 10px; padding: 5px 0; border-bottom: 1px solid #ffffff12; }
+.positive { font-weight: 700; }
+.collection { min-width: 220px; }
+.variant { color: #8f98a0; font-size: 11px; }
+.ev { min-width: 70px; text-align: right; font-variant-numeric: tabular-nums; }
+.naive { font-style: italic; }
+.skins { display: flex; gap: 8px; flex-wrap: wrap; }
+a { color: #66c0f4; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.same-range { font-style: italic; }
+.cheapest { font-style: italic; font-weight: 700; }

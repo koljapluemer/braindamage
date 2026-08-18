@@ -34,6 +34,7 @@
 
         <div class="flex items-center gap-2 whitespace-nowrap">
           <strong class="flex-1 text-[#66c0f4] text-[13px]">braindamage</strong>
+          <button type="button" :class="btnClass" @click="openOverview">Overview</button>
           <button type="button" :class="btnClass" :disabled="fetchFsm.is('loading')" @click="refresh">Refresh</button>
           <button type="button" :class="btnClass" :disabled="contractFsm.is('loading')" @click="construct"
                   title="Run the buy combo search on just what's visible on this page right now">
