@@ -163,6 +163,21 @@ def _write_buy_order_summary(payload: dict[str, Any], prepared: _Prepared, curre
     return True
 
 
+def _recent_contract_history(skin_id: str, limit: int = 5) -> list[dict[str, Any]]:
+    """The `limit` most recently generated ContractHistorySignal entries for
+    `skin_id`, newest first -- what the sidebar's contract history list
+    (below everything else in the sidebar) renders."""
+    entries = signals.read_contract_history(skin_id)[-limit:]
+    return [
+        {
+            "generated_at": entry.generated_at.isoformat(),
+            "expected_value": entry.expected_value,
+            "raw_avg_float": entry.raw_avg_float,
+        }
+        for entry in reversed(entries)
+    ]
+
+
 def _serialize_combo(combo: offer_combos.ComboResult) -> dict[str, Any]:
     """JSON-safe rendering of one offer_combos.ComboResult for the sidebar's
     "Construct Contract" widget -- same fields braindamage.steam_offer_combos_report
@@ -176,6 +191,7 @@ def _serialize_combo(combo: offer_combos.ComboResult) -> dict[str, Any]:
         "rarity_name": skin.rarity_name,
         "stattrak": skin.stattrak,
         "avg_float": combo.avg_float,
+        "raw_avg_float": combo.raw_avg_float,
         "real_cost": combo.real_cost,
         "expected_output_value": sum(o.contribution for o in combo.outcomes),
         "expected_value": combo.expected_value,
@@ -254,6 +270,7 @@ def handle_fetch_offers(session: Session, payload: dict[str, Any]) -> dict[str, 
         "buy_order_written": buy_order_written,
         "table": table,
         "table_error": table_error,
+        "contract_history": _recent_contract_history(skin.id),
     }
 
 
@@ -296,13 +313,26 @@ def handle_construct_contract(session: Session, payload: dict[str, Any]) -> dict
                 "rarity tier, or its collection has no eligible output at that rarity."
             ),
         }
+    combo = combos[0]
+
+    signals.append_contract_history(
+        skin.id,
+        [
+            signals.ContractHistorySignal(
+                expected_value=combo.expected_value,
+                raw_avg_float=combo.raw_avg_float,
+                generated_at=signals.now_utc(),
+            )
+        ],
+    )
 
     return {
         "ok": True,
         "skin_name": skin.name,
         "written": len(prepared.entries),
         "buy_order_written": buy_order_written,
-        "contract": _serialize_combo(combos[0]),
+        "contract": _serialize_combo(combo),
+        "contract_history": _recent_contract_history(skin.id),
     }
 
 

@@ -266,6 +266,13 @@
     return `${(value * 100).toFixed(1)}%`;
   }
 
+  function fmtDate(iso) {
+    // generated_at is a naive-UTC ISO string ("YYYY-MM-DDTHH:MM:SS...") --
+    // slice mm-dd out directly rather than going through Date(), which would
+    // reinterpret a timezone-less string in the browser's local time.
+    return iso.slice(5, 7) + "-" + iso.slice(8, 10);
+  }
+
   function priceCellClass(cell) {
     if (!cell || !cell.color) return "";
     return (
@@ -319,6 +326,11 @@
       );
       const fetchStatus = ref("");
       const table = ref(null);
+      // Last 5 "Construct Contract" results for whichever skin the page is
+      // currently showing -- refreshed by both the always-on fetch and
+      // Construct Contract itself, since either one resolves the page's
+      // skin and the host returns this alongside its own reply.
+      const contractHistory = ref([]);
 
       async function runFetchAndRender(scraped) {
         fetchFsm.send("start");
@@ -355,6 +367,7 @@
         if (reply.table_error) statusText += "\n" + reply.table_error;
         fetchStatus.value = statusText;
         table.value = reply.table;
+        contractHistory.value = reply.contract_history || [];
         fetchFsm.send("succeed");
       }
 
@@ -444,6 +457,7 @@
             return;
           }
           contract.value = reply.contract;
+          contractHistory.value = reply.contract_history || [];
           // Match each chosen offer back to its card on the page (by
           // float_value, the same synthetic identity
           // braindamage.steam_offer_combos uses -- see scrapePage above)
@@ -478,10 +492,12 @@
         contract,
         contractOffers,
         contractIndex,
+        contractHistory,
         construct: () => runConstructContract(scrapePage()),
         focusContractOffer,
         fmtMoney,
         fmtPct,
+        fmtDate,
         priceCellClass,
         btnClass: BTN_CLASS,
         tableClass: TABLE_CLASS,
@@ -634,6 +650,13 @@
                 </tr>
               </tbody>
             </table>
+          </div>
+        </div>
+
+        <div v-if="contractHistory.length" class="mt-2.5">
+          <h3 class="text-[11px] uppercase tracking-wide text-[#8f98a0] mt-3 mb-1">Contract history</h3>
+          <div v-for="(entry, i) in contractHistory" :key="i" class="text-[11px] whitespace-nowrap">
+            {{ fmtDate(entry.generated_at) }}: Generated contract with EV {{ fmtMoney(entry.expected_value) }} for float {{ entry.raw_avg_float.toFixed(4) }}
           </div>
         </div>
       </div>

@@ -79,6 +79,7 @@ def _reply(skin_name: str, written: int, *, buy_order_written: bool = False) -> 
         "buy_order_written": buy_order_written,
         "table": None,
         "table_error": "Collection A has no eligible output at 'Restricted'.",
+        "contract_history": [],
     }
 
 
@@ -294,10 +295,51 @@ class TestHandleConstructContract:
         assert len(contract["offers"]) == 10
         assert all(o["pattern_seed"] != 999 for o in contract["offers"])
         assert contract["outcomes"][0]["predicted_wear"] == "Factory New"
+        # avg of 0.02 + i*0.001 for i in 0..9, unnormalized -- distinct from
+        # avg_float, which is rescaled into the skin's own [min_float,
+        # max_float] window.
+        assert contract["raw_avg_float"] == pytest.approx(0.0245)
 
         # Still saved to disk exactly like a normal fetch would.
         on_disk = signals.read_steam_offers("in-a")
         assert len(on_disk) == 11  # the 10 fresh + the pre-seeded stale one
+
+        # And the contract itself is recorded to the per-skin history, which
+        # comes back in the same reply for the sidebar's history list.
+        history = signals.read_contract_history("in-a")
+        assert len(history) == 1
+        assert history[0].expected_value == pytest.approx(contract["expected_value"])
+        assert history[0].raw_avg_float == pytest.approx(0.0245)
+        assert reply["contract_history"] == [
+            {
+                "generated_at": history[0].generated_at.isoformat(),
+                "expected_value": history[0].expected_value,
+                "raw_avg_float": history[0].raw_avg_float,
+            }
+        ]
+
+    def test_contract_history_keeps_only_the_5_most_recent_newest_first(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        signals.append_price_observations(
+            "out-a",
+            [signals.PriceObservationSignal(source="test", wear_name="Factory New", price=100.0, fetched_at=now_utc())],
+        )
+
+        evs = []
+        for i in range(6):
+            reply = steam_offers_host.handle_message(
+                session, _payload(offers=_ten_offers(start_price=1.0 + i), action="construct_contract")
+            )
+            assert reply["ok"] is True
+            evs.append(reply["contract"]["expected_value"])
+
+        assert len(signals.read_contract_history("in-a")) == 6
+        history = reply["contract_history"]
+        assert len(history) == 5
+        # Newest first, and the oldest run (i=0) has aged out of the
+        # returned last-5 window.
+        assert [h["expected_value"] for h in history] == list(reversed(evs[1:]))
 
     def test_fewer_than_ten_in_window_offers_returns_error(self, session):
         _make_skin(session, id="in-a", name="Input A")

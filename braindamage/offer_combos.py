@@ -74,6 +74,7 @@ class ComboResult:
     input_skin: Skin
     offers: list[PricedFloatOffer]
     avg_float: float
+    raw_avg_float: float
     real_cost: float
     outcomes: list[ComboOutcome]
     expected_value: float
@@ -129,6 +130,7 @@ def _evaluate_combo(
     min_in = skin.min_float if skin.min_float is not None else 0.0
     max_in = skin.max_float if skin.max_float is not None else 1.0
     avg_float = sum(normalized_float(o.float_value, min_in, max_in) for o in offers) / len(offers)
+    raw_avg_float = sum(o.float_value for o in offers) / len(offers)
     real_cost = sum(o.price for o in offers)
 
     outcomes: list[ComboOutcome] = []
@@ -157,6 +159,7 @@ def _evaluate_combo(
         input_skin=skin,
         offers=list(offers),
         avg_float=avg_float,
+        raw_avg_float=raw_avg_float,
         real_cost=real_cost,
         outcomes=outcomes,
         expected_value=expected_revenue - real_cost,
