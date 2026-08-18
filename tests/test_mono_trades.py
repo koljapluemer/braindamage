@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from braindamage import signals
+from braindamage import signals, steam_fees
 from braindamage.models import Base, Contract, Skin
 from braindamage.mono_trades import _representative_float, generate_mono_trades
 from braindamage.tradeup import INPUT_RARITIES
@@ -124,8 +124,8 @@ class TestGenerateMonoTrades:
 
         assert [row.input_lines[0]["skin_id"] for row in rows] == ["in-a"]
         assert rows[0].input_cost == pytest.approx(50.0)
-        # 170 net output (200 * 0.85) minus 50 input cost.
-        assert rows[0].expected_value == pytest.approx(120.0)
+        # Net output (Steam's real fee on a $200 sale) minus 50 input cost.
+        assert rows[0].expected_value == pytest.approx(steam_fees.net_proceeds(200.0) - 50.0)
 
         assert progress_calls == [(i, len(INPUT_RARITIES) * 2) for i in range(1, len(INPUT_RARITIES) * 2 + 1)]
 

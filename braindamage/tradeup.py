@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import pricing
+from . import pricing, steam_fees
 from .models import Skin
 
 # Rarity ladder, ranked by color rather than name — weapon/knife/glove categories
@@ -85,10 +85,11 @@ def wear_for_float(f: float) -> str:
     return WEAR_BUCKETS[-1][0]
 
 
-# CS2's total Steam Community Market cut. A flat rate, not the precise
-# per-component-with-minimums rounding Steam actually applies — good enough for a
-# "basic EV", revisit if/when this needs cent-accurate numbers.
-SELL_FEE_RATE = 0.15
+# All net-sell-proceeds math below uses braindamage.steam_fees.net_proceeds,
+# an exact port of Steam's own fee algorithm (5% Steam + 10% game fee, each
+# floored to the cent with its own $0.01 minimum) — not a flat rate. See
+# that module's docstring for why a flat rate is wrong in both magnitude
+# and direction (the two cuts are computed on top of net, not off gross).
 
 
 # --- Contract state ----------------------------------------------------------
@@ -417,7 +418,7 @@ def simulate_contract(session: Session, contract: ContractState) -> SimulationRe
             contribution = 0.0
         else:
             gross_price, _observed_at = price_info
-            net_price = gross_price * (1 - SELL_FEE_RATE)
+            net_price = steam_fees.net_proceeds(gross_price)
             contribution = probability * net_price
             expected_output_value += probability * gross_price
         outcomes.append(
@@ -558,7 +559,7 @@ def evaluate_contract_range(
         price_info = pricing.latest_price_for_wear(skin.id, wear)
         if price_info is not None:
             gross, _observed_at = price_info
-            net = gross * (1 - SELL_FEE_RATE)
+            net = steam_fees.net_proceeds(gross)
             contribution = probability * net
             expected_revenue += contribution
         else:
@@ -701,7 +702,7 @@ def simulate_ev_curve(session: Session, contract: ContractState, n_samples: int 
             net_price = 0.0
             if price_info is not None:
                 gross_price, _observed_at = price_info
-                net_price = gross_price * (1 - SELL_FEE_RATE)
+                net_price = steam_fees.net_proceeds(gross_price)
             expected_revenue += probability * net_price
             weighted_net_prices.append((net_price, probability))
 

@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from braindamage import pricing, signals
+from braindamage import pricing, signals, steam_fees
 from braindamage.models import Base, Skin
 from braindamage.tradeup import (
     INPUT_RARITIES,
@@ -401,10 +401,10 @@ class TestSimulateContract:
         assert outcome.probability == pytest.approx(1.0)  # only collection, only output
         assert outcome.predicted_wear == "Battle-Scarred"
         assert outcome.gross_price == pytest.approx(50.0)
-        assert outcome.net_price == pytest.approx(50.0 * 0.85)
+        assert outcome.net_price == pytest.approx(steam_fees.net_proceeds(50.0))
         assert result.expected_output_value == pytest.approx(50.0)
-        assert result.expected_value == pytest.approx(50.0 * 0.85 - 100.0)
-        assert result.roi == pytest.approx((50.0 * 0.85 - 100.0) / 100.0)
+        assert result.expected_value == pytest.approx(steam_fees.net_proceeds(50.0) - 100.0)
+        assert result.roi == pytest.approx((steam_fees.net_proceeds(50.0) - 100.0) / 100.0)
         assert result.missing_input_price_names == []
         assert result.missing_output_price_names == []
 
@@ -485,14 +485,14 @@ class TestSimulateEvCurve:
 
         fn_point = points[0]  # avg_float == 0.0 -> Factory New both sides
         assert fn_point.input_cost == pytest.approx(50.0)  # 10 * $5
-        assert fn_point.expected_revenue == pytest.approx(20.0 * 0.85)
-        assert fn_point.expected_value == pytest.approx(20.0 * 0.85 - 50.0)
+        assert fn_point.expected_revenue == pytest.approx(steam_fees.net_proceeds(20.0))
+        assert fn_point.expected_value == pytest.approx(steam_fees.net_proceeds(20.0) - 50.0)
         assert fn_point.stdev == pytest.approx(0.0)  # single possible outcome
 
         bs_point = points[-1]  # avg_float == 1.0 -> Battle-Scarred both sides
         assert bs_point.input_cost == pytest.approx(100.0)  # 10 * $10
-        assert bs_point.expected_revenue == pytest.approx(50.0 * 0.85)
-        assert bs_point.expected_value == pytest.approx(50.0 * 0.85 - 100.0)
+        assert bs_point.expected_revenue == pytest.approx(steam_fees.net_proceeds(50.0))
+        assert bs_point.expected_value == pytest.approx(steam_fees.net_proceeds(50.0) - 100.0)
 
     def test_missing_price_for_a_bucket_contributes_zero_not_an_error(self, session, signals_dir):
         input_skin = _make_skin(session, id="input-skin", name="Input Skin", rarity_name="Mil-Spec Grade", min_float=0.0, max_float=1.0)

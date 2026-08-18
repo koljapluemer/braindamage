@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 
-from ...tradeup import SELL_FEE_RATE
+from ... import steam_fees
 
 _HEADERS = ["Probability", "Skin", "Wear", "Net Price", "Contribution"]
 _HEADER_TOOLTIPS = [
@@ -20,9 +20,10 @@ _HEADER_TOOLTIPS = [
     "One specific skin this contract could output — every row is a different possible result, not a guarantee.",
     "Wear this specific output skin would land in, computed from your inputs' average float remapped through "
     "this skin's own [min float, max float] range (not the raw average float itself).",
-    f"What you'd actually receive selling THIS row's skin on Steam at current market price: "
-    f"gross price × (1 − {SELL_FEE_RATE:.0%} sell fee) = gross price × {1 - SELL_FEE_RATE:.2f}. "
-    "Net of Steam's marketplace cut only — nothing else is subtracted here.",
+    "What you'd actually receive selling THIS row's skin on Steam at current market price, after Steam's real "
+    "per-sale fee (5% Steam + 10% game fee, each rounded to the cent — computed exactly the way Steam itself "
+    f"computes it, not a flat percentage; works out to about {steam_fees.NOMINAL_CUT_OF_GROSS:.0%} of gross for "
+    "most prices, more for very cheap ones). Net of Steam's marketplace cut only — nothing else is subtracted here.",
     "This row's slice of the contract's total expected revenue: Probability × Net Price. Sum every row's "
     "Contribution and you get the total expected payout that Expected Value (top) subtracts Input Cost from — "
     "so a 5% chance at $50 (Contribution $2.50) counts the same as a 50% chance at $5.",

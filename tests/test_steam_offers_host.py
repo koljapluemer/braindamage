@@ -250,6 +250,101 @@ class TestHandleMessage:
         assert len(reply["table"]["rows"]) == 5
 
 
+def _ten_offers(start_price: float = 1.0) -> list[dict]:
+    return [
+        {"float_value": 0.02 + i * 0.001, "pattern_seed": i, "price": start_price + i}
+        for i in range(10)
+    ]
+
+
+class TestHandleConstructContract:
+    def test_builds_contract_from_payload_offers_only_and_still_writes_to_disk(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        signals.append_price_observations(
+            "out-a",
+            [signals.PriceObservationSignal(source="test", wear_name="Factory New", price=100.0, fetched_at=now_utc())],
+        )
+        # Stale disk data for the same skin that handle_construct_contract must
+        # NOT draw from -- if it leaked in, the cheapest 10 would include this
+        # $0.01 offer instead of matching _ten_offers()'s real_cost exactly.
+        signals.append_steam_offers(
+            "in-a",
+            [
+                signals.SteamOfferSignal(
+                    market_hash_name="Input A (Field-Tested)",
+                    wear_name="Field-Tested",
+                    float_value=0.5,
+                    pattern_seed=999,
+                    price=0.01,
+                    fetched_at=now_utc(),
+                )
+            ],
+        )
+
+        reply = steam_offers_host.handle_message(
+            session, _payload(offers=_ten_offers(), action="construct_contract")
+        )
+
+        assert reply["ok"] is True
+        assert reply["written"] == 10
+        contract = reply["contract"]
+        assert contract["skin_name"] == "Input A"
+        assert contract["real_cost"] == pytest.approx(sum(1.0 + i for i in range(10)))
+        assert len(contract["offers"]) == 10
+        assert all(o["pattern_seed"] != 999 for o in contract["offers"])
+        assert contract["outcomes"][0]["predicted_wear"] == "Factory New"
+
+        # Still saved to disk exactly like a normal fetch would.
+        on_disk = signals.read_steam_offers("in-a")
+        assert len(on_disk) == 11  # the 10 fresh + the pre-seeded stale one
+
+    def test_fewer_than_ten_in_window_offers_returns_error(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+
+        reply = steam_offers_host.handle_message(
+            session, _payload(offers=_ten_offers()[:9], action="construct_contract")
+        )
+
+        assert reply["ok"] is False
+        assert "Only 9 listing" in reply["error"]
+
+    def test_offers_with_no_float_dont_count_toward_the_ten(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+        offers = _ten_offers()
+        offers[0] = {"pattern_seed": 0, "price": 1.0}  # no float_value
+
+        reply = steam_offers_host.handle_message(
+            session, _payload(offers=offers, action="construct_contract")
+        )
+
+        assert reply["ok"] is False
+        assert "Only 9 listing" in reply["error"]
+
+    def test_invalid_input_skin_returns_error(self, session):
+        _make_skin(session, id="in-covert", name="Input Covert", rarity_name="Covert")
+
+        reply = steam_offers_host.handle_message(
+            session,
+            _payload(
+                market_hash_name="Input Covert (Field-Tested)",
+                offers=_ten_offers(),
+                action="construct_contract",
+            ),
+        )
+
+        assert reply["ok"] is False
+        assert "isn't a usable mono trade-up input" in reply["error"]
+
+    def test_unknown_action_returns_error(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+
+        reply = steam_offers_host.handle_message(session, _payload(action="not_a_real_action"))
+
+        assert reply["ok"] is False
+        assert "Unknown action" in reply["error"]
+
+
 class TestMessageFraming:
     def test_write_then_read_round_trips(self):
         import io

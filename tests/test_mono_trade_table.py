@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from braindamage import mono_trade_table, signals
+from braindamage import mono_trade_table, signals, steam_fees
 from braindamage.models import Base, Skin
 from braindamage.signals import now_utc
 
@@ -161,7 +161,9 @@ class TestBuildTableRows:
 
         row = next(r for r in table["rows"] if r["wear_name"] == "Field-Tested")
         cell = row["outcome_cells"][0]
-        assert cell == {"value": 80.0, "color": "purple", "source": "buy_order"}
+        # Cell value is net of Steam's real sell fee, not the raw $80 buy-order
+        # ask -- this table shows what you'd actually walk away with.
+        assert cell == {"value": steam_fees.net_proceeds(80.0), "color": "purple", "source": "buy_order"}
 
     def test_outcome_cell_falls_back_to_grey_when_no_buy_order(self, session):
         skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
@@ -177,7 +179,7 @@ class TestBuildTableRows:
 
         row = next(r for r in table["rows"] if r["wear_name"] == "Field-Tested")
         cell = row["outcome_cells"][0]
-        assert cell == {"value": 50.0, "color": "grey", "source": "fallback"}
+        assert cell == {"value": steam_fees.net_proceeds(50.0), "color": "grey", "source": "fallback"}
 
     def test_outcome_cell_is_empty_when_no_price_at_all(self, session):
         skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
@@ -213,7 +215,7 @@ class TestBuildTableRows:
 
         row = next(r for r in table["rows"] if r["wear_name"] == "Field-Tested")
         # probability = 1/2 per output; only out-a is priced.
-        expected_ev = 0.5 * 100.0 * 0.85 - 10.0
+        expected_ev = 0.5 * steam_fees.net_proceeds(100.0) - 10.0
         assert row["ev_cell"]["value"] == pytest.approx(expected_ev)
 
     def test_stattrak_input_only_matches_stattrak_outputs(self, session):

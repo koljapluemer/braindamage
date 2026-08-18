@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from braindamage import offer_combos, signals
+from braindamage import offer_combos, signals, steam_fees
 from braindamage.models import Base, Skin
 from braindamage.signals import now_utc
 
@@ -102,7 +102,7 @@ class TestBestCombosForSkin:
         best = results[0]
         assert best.real_cost == pytest.approx(sum(range(10)))
         assert best.outcomes[0].predicted_wear == "Factory New"
-        assert best.expected_value == pytest.approx(100.0 * 0.85 - best.real_cost)
+        assert best.expected_value == pytest.approx(steam_fees.net_proceeds(100.0) - best.real_cost)
 
     def test_invalid_input_skin_returns_nothing(self, session):
         _make_skin(session, id="in-covert", name="Input Covert", rarity_name="Covert")

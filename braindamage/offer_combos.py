@@ -15,10 +15,9 @@ from typing import Protocol
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import pricing
+from . import pricing, steam_fees
 from .models import Skin
 from .tradeup import (
-    SELL_FEE_RATE,
     collection_probability,
     next_rarity,
     normalized_float,
@@ -107,7 +106,7 @@ def _output_specs(session: Session, skin: Skin) -> list[OutputSpec] | None:
     specs = []
     for out_skin in output_skins:
         net_by_wear = {
-            wear: price * (1 - SELL_FEE_RATE)
+            wear: steam_fees.net_proceeds(price)
             for wear, (price, _observed_at) in pricing.latest_prices_by_wear(out_skin.id).items()
         }
         specs.append(

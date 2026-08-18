@@ -20,12 +20,13 @@ from __future__ import annotations
 import json
 import struct
 import sys
+from dataclasses import dataclass
 from typing import Any, BinaryIO
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import config, mono_trade_table, signals
+from . import config, mono_trade_table, offer_combos, signals
 from .db import SessionLocal, upgrade_database
 from .market_names import parse_market_hash_name
 from .models import Skin
@@ -40,35 +41,25 @@ from .signals import SteamOfferSignal
 _SUPPORTED_CURRENCIES = ("USD", "EUR")
 
 
-def handle_message(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
-    """Validates and writes one scrape payload; never raises for an expected
-    failure mode -- always returns {"ok": False, "error": ...} instead, so
-    the stdio loop only ever needs to JSON-dump whatever this returns.
+@dataclass
+class _Prepared:
+    """Everything both handlers below need after validating one scrape
+    payload and resolving it to a catalog Skin: the resolved skin, the raw
+    market_hash_name (for BuyOrderSummarySignal's own market_hash_name
+    field), and every offer converted to a SteamOfferSignal (price already
+    normalized to USD). Not written to disk yet -- callers decide that."""
 
-    Expected payload shape:
-        {"market_hash_name": str, "currency": str,
-         "offers": [{"wear_name": str | None, "float_value": float,
-                     "pattern_seed": int | None, "price": float}, ...],
-         "buy_order_summary": {"wear_name": str, "price": float,
-                                "num_orders": int} | None}
+    skin: Skin
+    market_hash_name: str
+    entries: list[SteamOfferSignal]
 
-    market_hash_name only needs to be ONE representative "<name> (<wear>)"
-    string (used to resolve the Skin) -- a single Steam Market page can list
-    every wear condition of one weapon together, so offers may span more
-    than one wear. Each offer's own "wear_name" (if present) is used for
-    that offer's SteamOfferSignal; market_hash_name's parsed wear is only a
-    fallback for offers that didn't carry one.
 
-    buy_order_summary is optional (Steam only renders that line once a wear
-    filter is active on the page -- see webext/sidebar.js) and shares the
-    top-level `currency`, since it's scraped off the same page as everything
-    else here. When present it's written as a BuyOrderSummarySignal.
-
-    On success, the reply also carries the sidebar's mono-trade price table
-    for the resolved skin (see braindamage.mono_trade_table) -- "table" is
-    None with "table_error" explaining why if the skin isn't a usable
-    trade-up input, e.g. a Covert (no next rarity) or an orphaned collection.
-    """
+def _validate_and_prepare(session: Session, payload: dict[str, Any]) -> _Prepared | dict[str, Any]:
+    """Shared front half of both handlers below: validates the payload shape
+    and currency, resolves market_hash_name to exactly one catalog Skin, and
+    converts every offer to a SteamOfferSignal. Returns a `dict` (the
+    {"ok": False, ...} error reply) on any expected failure -- callers must
+    check `isinstance(result, dict)` before touching it as a _Prepared."""
     try:
         market_hash_name = payload["market_hash_name"]
         currency = payload["currency"]
@@ -133,36 +124,121 @@ def handle_message(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
                 raw=raw,
             )
         )
-    signals.append_steam_offers(skin.id, entries)
+    return _Prepared(skin=skin, market_hash_name=market_hash_name, entries=entries)
 
-    buy_order_written = False
+
+def _write_buy_order_summary(payload: dict[str, Any], prepared: _Prepared, currency: str) -> bool:
+    """Writes payload's optional buy_order_summary (see handle_fetch_offers'
+    docstring) as a BuyOrderSummarySignal -- returns whether one was written.
+    Shared by both handlers so "Construct Contract" captures the same
+    on-page data a plain scrape would, not less of it."""
     buy_order_summary = payload.get("buy_order_summary")
-    if buy_order_summary:
-        bo_wear = buy_order_summary.get("wear_name")
-        bo_price = buy_order_summary.get("price")
-        bo_num_orders = buy_order_summary.get("num_orders")
-        if bo_wear and bo_price is not None and bo_num_orders is not None:
-            if currency == "EUR":
-                usd_bo_price = bo_price * config.EUR_USD_RATE
-                bo_raw = {"original_currency": "EUR", "original_price": bo_price, "eur_usd_rate": config.EUR_USD_RATE}
-            else:
-                usd_bo_price = bo_price
-                bo_raw = {}
-            signals.append_buy_order_summaries(
-                skin.id,
-                [
-                    signals.BuyOrderSummarySignal(
-                        market_hash_name=market_hash_name,
-                        wear_name=bo_wear,
-                        price=usd_bo_price,
-                        currency="USD",
-                        num_orders=bo_num_orders,
-                        fetched_at=signals.now_utc(),
-                        raw=bo_raw,
-                    )
-                ],
+    if not buy_order_summary:
+        return False
+    bo_wear = buy_order_summary.get("wear_name")
+    bo_price = buy_order_summary.get("price")
+    bo_num_orders = buy_order_summary.get("num_orders")
+    if not bo_wear or bo_price is None or bo_num_orders is None:
+        return False
+    if currency == "EUR":
+        usd_bo_price = bo_price * config.EUR_USD_RATE
+        bo_raw = {"original_currency": "EUR", "original_price": bo_price, "eur_usd_rate": config.EUR_USD_RATE}
+    else:
+        usd_bo_price = bo_price
+        bo_raw = {}
+    signals.append_buy_order_summaries(
+        prepared.skin.id,
+        [
+            signals.BuyOrderSummarySignal(
+                market_hash_name=prepared.market_hash_name,
+                wear_name=bo_wear,
+                price=usd_bo_price,
+                currency="USD",
+                num_orders=bo_num_orders,
+                fetched_at=signals.now_utc(),
+                raw=bo_raw,
             )
-            buy_order_written = True
+        ],
+    )
+    return True
+
+
+def _serialize_combo(combo: offer_combos.ComboResult) -> dict[str, Any]:
+    """JSON-safe rendering of one offer_combos.ComboResult for the sidebar's
+    "Construct Contract" widget -- same fields braindamage.steam_offer_combos_report
+    shows in its combo-card, just as data instead of HTML."""
+    skin = combo.input_skin
+    roi = combo.expected_value / combo.real_cost if combo.real_cost > 0 else None
+    return {
+        "skin_id": skin.id,
+        "skin_name": skin.name,
+        "collection_name": skin.collection_name,
+        "rarity_name": skin.rarity_name,
+        "stattrak": skin.stattrak,
+        "avg_float": combo.avg_float,
+        "real_cost": combo.real_cost,
+        "expected_output_value": sum(o.contribution for o in combo.outcomes),
+        "expected_value": combo.expected_value,
+        "roi": roi,
+        "offers": [
+            {
+                "wear_name": o.wear_name,
+                "float_value": o.float_value,
+                "pattern_seed": o.pattern_seed,
+                "price": o.price,
+            }
+            for o in sorted(combo.offers, key=lambda o: o.price)
+        ],
+        "outcomes": [
+            {
+                "skin_name": o.skin_name,
+                "collection_name": o.collection_name,
+                "probability": o.probability,
+                "predicted_wear": o.predicted_wear,
+                "net_price": o.net_price,
+                "contribution": o.contribution,
+            }
+            for o in combo.outcomes
+        ],
+    }
+
+
+def handle_fetch_offers(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    """Validates and writes one scrape payload; never raises for an expected
+    failure mode -- always returns {"ok": False, "error": ...} instead, so
+    the stdio loop only ever needs to JSON-dump whatever this returns.
+
+    Expected payload shape:
+        {"market_hash_name": str, "currency": str,
+         "offers": [{"wear_name": str | None, "float_value": float,
+                     "pattern_seed": int | None, "price": float}, ...],
+         "buy_order_summary": {"wear_name": str, "price": float,
+                                "num_orders": int} | None}
+
+    market_hash_name only needs to be ONE representative "<name> (<wear>)"
+    string (used to resolve the Skin) -- a single Steam Market page can list
+    every wear condition of one weapon together, so offers may span more
+    than one wear. Each offer's own "wear_name" (if present) is used for
+    that offer's SteamOfferSignal; market_hash_name's parsed wear is only a
+    fallback for offers that didn't carry one.
+
+    buy_order_summary is optional (Steam only renders that line once a wear
+    filter is active on the page -- see webext/sidebar.js) and shares the
+    top-level `currency`, since it's scraped off the same page as everything
+    else here. When present it's written as a BuyOrderSummarySignal.
+
+    On success, the reply also carries the sidebar's mono-trade price table
+    for the resolved skin (see braindamage.mono_trade_table) -- "table" is
+    None with "table_error" explaining why if the skin isn't a usable
+    trade-up input, e.g. a Covert (no next rarity) or an orphaned collection.
+    """
+    prepared = _validate_and_prepare(session, payload)
+    if isinstance(prepared, dict):
+        return prepared
+    skin = prepared.skin
+
+    signals.append_steam_offers(skin.id, prepared.entries)
+    buy_order_written = _write_buy_order_summary(payload, prepared, payload["currency"])
 
     table = None
     table_error = None
@@ -174,11 +250,82 @@ def handle_message(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
         "skin_name": skin.name,
-        "written": len(entries),
+        "written": len(prepared.entries),
         "buy_order_written": buy_order_written,
         "table": table,
         "table_error": table_error,
     }
+
+
+def handle_construct_contract(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    """The "Construct Contract" sidebar button's handler: same payload shape
+    as handle_fetch_offers (it's built from the exact same scrapePage()
+    call), and writes to disk the same way -- but instead of the sidebar's
+    always-on mono-trade table (which prices off whatever's on disk,
+    however stale), this runs offer_combos.best_combos_for_skin directly
+    against `payload`'s own offers and NOTHING ELSE, so the single combo it
+    returns is only ever built from listings that are in the browser window
+    at this exact moment -- i.e. actually buyable right now, not stitched
+    together from offers that may have sold or been delisted since an
+    earlier scrape.
+    """
+    prepared = _validate_and_prepare(session, payload)
+    if isinstance(prepared, dict):
+        return prepared
+    skin = prepared.skin
+
+    signals.append_steam_offers(skin.id, prepared.entries)
+    buy_order_written = _write_buy_order_summary(payload, prepared, payload["currency"])
+
+    in_window_offers = [o for o in prepared.entries if o.float_value is not None]
+    if len(in_window_offers) < offer_combos.REQUIRED_INPUTS:
+        return {
+            "ok": False,
+            "error": (
+                f"Only {len(in_window_offers)} listing(s) with a visible float are on this page right now -- "
+                f"need at least {offer_combos.REQUIRED_INPUTS} to construct a mono trade-up contract."
+            ),
+        }
+
+    combos = offer_combos.best_combos_for_skin(session, skin, in_window_offers, top_n=1)
+    if not combos:
+        return {
+            "ok": False,
+            "error": (
+                f"{skin.name} isn't a usable mono trade-up input right now -- wrong category, no next "
+                "rarity tier, or its collection has no eligible output at that rarity."
+            ),
+        }
+
+    return {
+        "ok": True,
+        "skin_name": skin.name,
+        "written": len(prepared.entries),
+        "buy_order_written": buy_order_written,
+        "contract": _serialize_combo(combos[0]),
+    }
+
+
+# Action names the sidebar's payload carries in its "action" field --
+# "fetch_offers" (the default, for payloads with none, e.g. from before this
+# field existed) is the always-on scrape+table refresh; "construct_contract"
+# is the "Construct Contract" button. Both share the exact same payload
+# shape and disk-write behavior, differing only in what they compute after.
+_HANDLERS = {
+    "fetch_offers": handle_fetch_offers,
+    "construct_contract": handle_construct_contract,
+}
+
+
+def handle_message(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    """Dispatches one native-messaging request to its handler by
+    payload["action"] (see _HANDLERS) -- never raises for an expected
+    failure mode, always returns {"ok": False, "error": ...} instead."""
+    action = payload.get("action", "fetch_offers") if isinstance(payload, dict) else "fetch_offers"
+    handler = _HANDLERS.get(action)
+    if handler is None:
+        return {"ok": False, "error": f"Unknown action {action!r}"}
+    return handler(session, payload)
 
 
 # --- Native messaging stdio framing ---------------------------------------------

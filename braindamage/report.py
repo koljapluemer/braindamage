@@ -17,8 +17,9 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from . import steam_fees
 from .models import Contract, Skin
-from .tradeup import RARITY_LADDER, SELL_FEE_RATE
+from .tradeup import RARITY_LADDER
 
 _RARITY_COLOR = dict(RARITY_LADDER)
 
@@ -348,7 +349,7 @@ def _range_outcomes_table(range_detail) -> str:
         f"<th>{_tip('Wear bucket', 'Wear this output lands in when bought into this range — constant across the whole range by construction.')}</th>"
         f"<th class='num'>{_tip('Predicted float', 'This output’s own float, remapped through its [min float, max float] from wherever in this range your average input float actually lands — a span, not one number, since it still moves within the range even though wear/price don’t.')}</th>"
         f"<th class='num'>{_tip('Sale price (gross)', 'What this skin currently sells for on Steam before the sell fee is deducted.')}</th>"
-        f"<th class='num'>{_tip(f'Sale price (net, {SELL_FEE_RATE:.0%} fee)', f'What you’d actually receive selling this skin: gross price × (1 − {SELL_FEE_RATE:.0%}) = gross price × {1 - SELL_FEE_RATE:.2f}.')}</th>"
+        f"<th class='num'>{_tip('Sale price (net)', 'What you’d actually receive selling this skin on Steam Community Market: gross price minus Steam’s real per-sale fee (5% Steam + 10% game fee, each rounded to the cent — computed exactly the way Steam itself computes it, not a flat percentage). Works out to about 13% of the gross price for most listings, more for very cheap ones where the $0.01-per-fee minimums dominate.')}</th>"
         f"<th class='num'>{_tip('Profit if rolled', 'Net sale price minus this range’s input cost — what you’d walk away with if this exact outcome were rolled after buying into this range.')}</th>"
         f"<th class='num'>{_tip('Contribution', 'This row’s slice of this range’s expected revenue: Probability × Net Price.')}</th>"
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
@@ -649,9 +650,10 @@ def _contract_card(
         + _metric_card(
             "Expected value",
             "Probability-weighted average profit at the best buying range: the sum of every possible "
-            f"outcome’s (probability × net sell price after the {SELL_FEE_RATE:.0%} Steam fee), minus input "
-            "cost. Positive means the contract is profitable on average; it says nothing about how risky "
-            "any single roll is.",
+            "outcome’s (probability × net sell price after Steam’s real per-sale fee — 5% Steam + 10% game "
+            f"fee, computed cent-exact the way Steam itself computes it, about {steam_fees.NOMINAL_CUT_OF_GROSS:.0%} "
+            "of gross for most prices), minus input cost. Positive means the contract is profitable on "
+            "average; it says nothing about how risky any single roll is.",
             _money(expected_value, signed=True),
             ev_class,
         )

@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from braindamage import contracts as contracts_module
-from braindamage import signals, steam_market_api, tradeup
+from braindamage import signals, steam_fees, steam_market_api, tradeup
 from braindamage.models import Base, Contract, Skin
 
 
@@ -89,7 +89,7 @@ class TestRefreshContractPrices:
         )
         updated = session.get(Contract, contract.id)
         assert updated.input_cost == pytest.approx(20.0)  # 10 x $2.00
-        assert updated.expected_value == pytest.approx(22.5)  # (50 * 0.85) - 20
+        assert updated.expected_value == pytest.approx(steam_fees.net_proceeds(50.0) - 20.0)
 
     def test_gives_up_after_exhausting_retries_on_persistent_429(self, session, monkeypatch):
         contract = self._setup_mono_contract(session, monkeypatch)

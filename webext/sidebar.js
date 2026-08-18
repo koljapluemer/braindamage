@@ -124,11 +124,20 @@
     return null;
   }
 
+  // Card DOM elements for whatever scrapePage() last found, keyed by
+  // float_value -- lets the "Construct Contract" widget below map the
+  // combo's chosen offers back to the actual listing cards on the page, to
+  // highlight and scroll to them. Rebuilt fresh on every scrape (including
+  // the one "Construct Contract" itself triggers), so it always reflects
+  // what's in the window right now, never a stale prior scrape.
+  let lastScrapeCardsByFloat = new Map();
+
   function scrapePage() {
     const wearLabels = Array.from(document.querySelectorAll("div")).filter((div) =>
       textOf(div).startsWith("Wear Rating:")
     );
 
+    lastScrapeCardsByFloat = new Map();
     const seenRoots = new Set();
     const offers = [];
     let symbolGuess = null;
@@ -162,6 +171,7 @@
       const wearMatch = found.fullName.match(WEAR_SUFFIX_RE);
       if (!representativeName) representativeName = found.fullName;
 
+      lastScrapeCardsByFloat.set(floatValue, cardRoot);
       offers.push({
         wear_name: wearMatch ? wearMatch[1] : null,
         float_value: floatValue,
@@ -192,6 +202,15 @@
 
   async function sendScrapeToHost(payload) {
     const response = await browser.runtime.sendMessage({ type: "fetchOffers", payload });
+    if (!response.ok) throw new Error(response.error);
+    return response.reply;
+  }
+
+  async function sendConstructContractToHost(payload) {
+    const response = await browser.runtime.sendMessage({
+      type: "constructContract",
+      payload: Object.assign({}, payload, { action: "construct_contract" }),
+    });
     if (!response.ok) throw new Error(response.error);
     return response.reply;
   }
@@ -267,6 +286,216 @@
     els.tableWrap.appendChild(el);
   }
 
+  function fmtPct(value) {
+    if (value === null || value === undefined) return "—";
+    return `${(value * 100).toFixed(1)}%`;
+  }
+
+  function appendCells(tr, values) {
+    for (const value of values) {
+      const td = document.createElement("td");
+      td.textContent = value;
+      tr.appendChild(td);
+    }
+  }
+
+  // --- "Construct Contract" widget: the single best mono trade-up combo
+  // buildable from exactly what scrapePage() just found in the browser
+  // window, plus highlighting/scrolling to the 10 chosen listings on the
+  // page itself (see lastScrapeCardsByFloat above). ------------------------
+
+  let contractOffers = []; // [{offer, element: Element | null}, ...] for the current contract, in order
+  let contractIndex = -1;
+
+  function clearContractHighlights() {
+    for (const { element } of contractOffers) {
+      if (element) element.classList.remove("bd-highlight-card", "bd-highlight-current");
+    }
+  }
+
+  function focusContractOffer(index) {
+    if (!contractOffers.length) return;
+    contractIndex = ((index % contractOffers.length) + contractOffers.length) % contractOffers.length;
+    for (const { element } of contractOffers) {
+      if (element) element.classList.remove("bd-highlight-current");
+    }
+    const current = contractOffers[contractIndex];
+    if (current.element) {
+      current.element.classList.add("bd-highlight-current");
+      current.element.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    if (els.contractNavLabel) {
+      els.contractNavLabel.textContent = `${contractIndex + 1} / ${contractOffers.length}`;
+    }
+  }
+
+  function renderContractStatus(message, cls) {
+    clearContractHighlights();
+    contractOffers = [];
+    contractIndex = -1;
+    els.contractWrap.textContent = "";
+    const p = document.createElement("div");
+    p.className = "bd-inline-status " + (cls || "");
+    p.textContent = message;
+    els.contractWrap.appendChild(p);
+  }
+
+  function renderContract(contract) {
+    clearContractHighlights();
+
+    els.contractWrap.textContent = "";
+
+    const section = document.createElement("div");
+    section.id = "bd-contract";
+
+    const header = document.createElement("div");
+    header.className = "bd-contract-header";
+    const nameEl = document.createElement("strong");
+    nameEl.textContent = contract.stattrak ? `StatTrak™ ${contract.skin_name}` : contract.skin_name;
+    header.appendChild(nameEl);
+    const collectionEl = document.createElement("span");
+    collectionEl.className = "bd-contract-collection";
+    collectionEl.textContent = `— ${contract.collection_name} [${contract.rarity_name}]`;
+    header.appendChild(collectionEl);
+    const evBadge = document.createElement("span");
+    evBadge.className = "bd-contract-ev " + (contract.expected_value >= 0 ? "bd-ev-good" : "bd-ev-bad");
+    evBadge.textContent = `EV ${fmtMoney(contract.expected_value)}`;
+    header.appendChild(evBadge);
+    section.appendChild(header);
+
+    const metrics = document.createElement("div");
+    metrics.className = "bd-contract-metrics";
+    const metricDefs = [
+      ["Real cost (10 listings)", fmtMoney(contract.real_cost)],
+      ["Expected output value", fmtMoney(contract.expected_output_value)],
+      ["ROI", contract.roi === null ? "—" : fmtPct(contract.roi)],
+      ["Avg. normalized float", contract.avg_float.toFixed(4)],
+    ];
+    for (const [label, value] of metricDefs) {
+      const m = document.createElement("div");
+      m.className = "bd-metric";
+      const labelEl = document.createElement("span");
+      labelEl.className = "bd-metric-label";
+      labelEl.textContent = label;
+      const valueEl = document.createElement("span");
+      valueEl.textContent = value;
+      m.appendChild(labelEl);
+      m.appendChild(valueEl);
+      metrics.appendChild(m);
+    }
+    section.appendChild(metrics);
+
+    // Toggle-through-the-10-inputs nav -- scrolls the main Steam page to
+    // whichever of the 10 chosen listings is currently selected.
+    const nav = document.createElement("div");
+    nav.id = "bd-contract-nav";
+    const prevBtn = document.createElement("button");
+    prevBtn.type = "button";
+    prevBtn.textContent = "‹ Prev";
+    const nextBtn = document.createElement("button");
+    nextBtn.type = "button";
+    nextBtn.textContent = "Next ›";
+    const navLabel = document.createElement("span");
+    navLabel.id = "bd-contract-nav-label";
+    prevBtn.addEventListener("click", () => focusContractOffer(contractIndex - 1));
+    nextBtn.addEventListener("click", () => focusContractOffer(contractIndex + 1));
+    nav.appendChild(prevBtn);
+    nav.appendChild(navLabel);
+    nav.appendChild(nextBtn);
+    section.appendChild(nav);
+    els.contractNavLabel = navLabel;
+
+    const inputsLabel = document.createElement("h3");
+    inputsLabel.className = "bd-section-label";
+    inputsLabel.textContent = "The 10 listings to buy";
+    section.appendChild(inputsLabel);
+
+    const inputsTable = document.createElement("table");
+    inputsTable.innerHTML =
+      "<thead><tr><th>Wear</th><th>Float</th><th>Pattern</th><th>Price</th></tr></thead>";
+    const inputsBody = document.createElement("tbody");
+    inputsTable.appendChild(inputsBody);
+    section.appendChild(inputsTable);
+
+    const outcomesLabel = document.createElement("h3");
+    outcomesLabel.className = "bd-section-label";
+    outcomesLabel.textContent = "Possible outputs";
+    section.appendChild(outcomesLabel);
+
+    const outcomesTable = document.createElement("table");
+    outcomesTable.innerHTML =
+      "<thead><tr><th>Output</th><th>Collection</th><th>Chance</th><th>Wear</th><th>Net sell</th><th>Contribution</th></tr></thead>";
+    const outcomesBody = document.createElement("tbody");
+    for (const outcome of contract.outcomes) {
+      const tr = document.createElement("tr");
+      appendCells(tr, [
+        outcome.skin_name,
+        outcome.collection_name,
+        fmtPct(outcome.probability),
+        outcome.predicted_wear,
+        fmtMoney(outcome.net_price),
+        fmtMoney(outcome.contribution),
+      ]);
+      outcomesBody.appendChild(tr);
+    }
+    outcomesTable.appendChild(outcomesBody);
+    section.appendChild(outcomesTable);
+
+    els.contractWrap.appendChild(section);
+
+    // Match each chosen offer back to its card on the page (by float_value,
+    // the same synthetic identity braindamage.steam_offer_combos uses --
+    // see webext/sidebar.js's own scrapePage comment) and highlight it.
+    contractOffers = contract.offers.map((offer) => ({
+      offer,
+      element: lastScrapeCardsByFloat.get(offer.float_value) || null,
+    }));
+    for (const { element } of contractOffers) {
+      if (element) element.classList.add("bd-highlight-card");
+    }
+    for (let i = 0; i < contractOffers.length; i++) {
+      const tr = document.createElement("tr");
+      if (!contractOffers[i].element) tr.classList.add("bd-offer-not-found");
+      const offer = contractOffers[i].offer;
+      appendCells(tr, [
+        offer.wear_name || "—",
+        offer.float_value.toFixed(6),
+        offer.pattern_seed === null || offer.pattern_seed === undefined ? "—" : offer.pattern_seed,
+        fmtMoney(offer.price),
+      ]);
+      tr.addEventListener("click", () => focusContractOffer(i));
+      inputsBody.appendChild(tr);
+    }
+
+    focusContractOffer(0);
+  }
+
+  async function runConstructContract(scraped) {
+    if (!scraped.offers.length) {
+      renderContractStatus("No listings found on this page yet -- try Refresh once it's finished loading.", "err");
+      return;
+    }
+    if (!scraped.currency) {
+      renderContractStatus("Could not detect the page's currency -- refusing to send (this app assumes USD).", "err");
+      return;
+    }
+
+    els.constructBtn.disabled = true;
+    renderContractStatus("Constructing contract from what's on this page right now...");
+    try {
+      const reply = await sendConstructContractToHost(scraped);
+      if (!reply.ok) {
+        renderContractStatus(reply.error, "err");
+        return;
+      }
+      renderContract(reply.contract);
+    } catch (e) {
+      renderContractStatus("Could not reach the native host: " + e.message, "err");
+    } finally {
+      els.constructBtn.disabled = false;
+    }
+  }
+
   function setCollapsed(collapsed, { persist = true } = {}) {
     els.root.classList.toggle("bd-collapsed", collapsed);
     if (persist) browser.storage.local.set({ bdSidebarCollapsed: collapsed });
@@ -281,10 +510,12 @@
         <div id="bd-header">
           <strong>braindamage</strong>
           <button id="bd-refresh" type="button">Refresh</button>
+          <button id="bd-construct" type="button" title="Run the buy combo search on just what's visible on this page right now">Construct Contract</button>
           <button id="bd-collapse" type="button" title="Collapse">&raquo;</button>
         </div>
         <div id="bd-status"></div>
         <div id="bd-table-wrap"></div>
+        <div id="bd-contract-wrap"></div>
       </div>
     `;
     document.documentElement.appendChild(root);
@@ -293,12 +524,15 @@
     els.strip = root.querySelector("#bd-strip");
     els.status = root.querySelector("#bd-status");
     els.tableWrap = root.querySelector("#bd-table-wrap");
+    els.contractWrap = root.querySelector("#bd-contract-wrap");
     els.refreshBtn = root.querySelector("#bd-refresh");
+    els.constructBtn = root.querySelector("#bd-construct");
     els.collapseBtn = root.querySelector("#bd-collapse");
 
     els.strip.addEventListener("click", () => setCollapsed(false));
     els.collapseBtn.addEventListener("click", () => setCollapsed(true));
     els.refreshBtn.addEventListener("click", () => runFetchAndRender(scrapePage()));
+    els.constructBtn.addEventListener("click", () => runConstructContract(scrapePage()));
 
     browser.storage.local.get("bdSidebarCollapsed").then((stored) => {
       setCollapsed(Boolean(stored.bdSidebarCollapsed), { persist: false });

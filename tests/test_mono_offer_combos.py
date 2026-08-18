@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from braindamage import mono_offer_combos, pricing, signals
+from braindamage import mono_offer_combos, pricing, signals, steam_fees
 from braindamage.models import Base, Skin
 from braindamage.signals import MarketOfferSignal, now_utc
 
@@ -139,7 +139,7 @@ class TestBestCombosForSkin:
         assert best.real_cost == pytest.approx(sum(range(10)))  # 45: excludes l10 ($10), l11 ($11)
         assert best.outcomes[0].skin_name == "Output A"
         assert best.outcomes[0].predicted_wear == "Factory New"
-        expected_revenue = 100.0 * (1 - 0.15)  # SELL_FEE_RATE
+        expected_revenue = steam_fees.net_proceeds(100.0)
         assert best.expected_value == pytest.approx(expected_revenue - best.real_cost)
         assert best.expected_value >= results[1].expected_value >= results[2].expected_value
 

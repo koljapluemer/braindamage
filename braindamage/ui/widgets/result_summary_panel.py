@@ -11,7 +11,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QVBoxLayout, QWidget
 
-from ...tradeup import SELL_FEE_RATE
+from ... import steam_fees
 
 
 class _MetricCard(QFrame):
@@ -38,7 +38,7 @@ class _MetricCard(QFrame):
 class ResultSummaryPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        fee_pct = f"{SELL_FEE_RATE:.0%}"
+        fee_pct = f"{steam_fees.NOMINAL_CUT_OF_GROSS:.0%}"
         self._input_cost = _MetricCard(
             "Input Cost",
             "Total market cost of the 10 input skins, at current prices for each one's exact wear. "
@@ -47,8 +47,9 @@ class ResultSummaryPanel(QWidget):
         self._expected_value = _MetricCard(
             "Expected Value",
             "Probability-weighted average profit: the sum of every possible outcome's (probability × net sell "
-            f"price after the {fee_pct} Steam fee), minus Input Cost. Positive means the contract is profitable "
-            "on average; it says nothing about how risky any single roll is.",
+            "price after Steam's real per-sale fee — 5% Steam + 10% game fee, computed cent-exact the way Steam "
+            f"itself computes it, about {fee_pct} of gross for most prices), minus Input Cost. Positive means "
+            "the contract is profitable on average; it says nothing about how risky any single roll is.",
         )
         self._roi = _MetricCard(
             "ROI",

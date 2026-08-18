@@ -157,3 +157,148 @@
 #bd-table-wrap .bd-c-grey {
   background: rgba(156, 163, 175, 0.4);
 }
+
+#bd-header #bd-construct {
+  white-space: nowrap;
+}
+
+#bd-contract-wrap {
+  margin-top: 10px;
+}
+
+#bd-contract-wrap .bd-inline-status {
+  white-space: pre-wrap;
+  font-size: 11px;
+}
+
+#bd-contract-wrap .bd-inline-status.err {
+  color: #ff6b6b;
+}
+
+#bd-contract .bd-contract-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+#bd-contract .bd-contract-collection {
+  color: #8f98a0;
+  font-weight: 400;
+}
+
+#bd-contract .bd-contract-ev {
+  margin-left: auto;
+  font-weight: 700;
+}
+
+#bd-contract .bd-ev-good {
+  color: #6fd06f;
+}
+
+#bd-contract .bd-ev-bad {
+  color: #ff6b6b;
+}
+
+#bd-contract .bd-contract-metrics {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 8px 0 4px;
+}
+
+#bd-contract .bd-metric-label {
+  color: #8f98a0;
+  display: block;
+  font-size: 10px;
+}
+
+#bd-contract-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+#bd-contract-nav button {
+  background: #2a475e;
+  color: #c7d5e0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+#bd-contract-nav button:hover {
+  background: #375875;
+}
+
+#bd-contract-nav-label {
+  font-variant-numeric: tabular-nums;
+}
+
+#bd-contract h3.bd-section-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #8f98a0;
+  margin: 12px 0 4px;
+}
+
+#bd-contract table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+#bd-contract th,
+#bd-contract td {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 3px 8px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+#bd-contract th {
+  text-align: center;
+  background: #1b2838;
+}
+
+#bd-contract td:first-child,
+#bd-contract th:first-child {
+  text-align: left;
+}
+
+#bd-contract tbody tr {
+  cursor: default;
+}
+
+#bd-contract table:first-of-type tbody tr {
+  cursor: pointer;
+}
+
+#bd-contract table:first-of-type tbody tr:hover {
+  background: rgba(102, 192, 244, 0.15);
+}
+
+#bd-contract tr.bd-offer-not-found {
+  opacity: 0.6;
+}
+
+/* Highlighting the "Construct Contract" combo's 10 chosen listing cards on
+   the Steam page itself -- these two rules deliberately target the page's
+   own elements (unscoped by #bd-sidebar, unlike everything else in this
+   file) and use !important since the outline must survive whatever the
+   page's own styles set, without touching layout (outline doesn't
+   reflow). */
+.bd-highlight-card {
+  outline: 3px solid rgba(255, 215, 0, 0.85) !important;
+  outline-offset: -2px !important;
+  border-radius: 4px !important;
+}
+
+.bd-highlight-card.bd-highlight-current {
+  outline-color: #ff3b3b !important;
+  outline-width: 4px !important;
+}

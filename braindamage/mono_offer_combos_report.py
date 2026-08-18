@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from . import steam_fees
 from .mono_offer_combos import MAX_OFFER_AGE
 from .offer_combos import ComboResult
 from .report import _esc, _money, _pct
 from .signals import now_utc
-from .tradeup import RARITY_LADDER, SELL_FEE_RATE
+from .tradeup import RARITY_LADDER
 
 _RARITY_COLOR = dict(RARITY_LADDER)
 
@@ -218,8 +219,10 @@ guarantees more than one is simultaneously executable. Negative-EV combos are sh
 <main>
 {cards}
 </main>
-<footer>Input prices are each listing's real CSFloat ask; output prices are this app's regular price signals
-(net of the {SELL_FEE_RATE:.0%} Steam Community Market sell fee), same ones contract simulation uses.</footer>
+<footer>Input prices are each listing's real CSFloat ask; output prices are this app's regular price signals, net
+of Steam Community Market's real per-sale fee (5% Steam + 10% game fee, computed cent-exact the way Steam itself
+computes it -- about {steam_fees.NOMINAL_CUT_OF_GROSS:.0%} of gross for most prices, more for very cheap listings),
+same ones contract simulation uses.</footer>
 </div>
 </body>
 </html>"""

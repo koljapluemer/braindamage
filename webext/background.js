@@ -5,8 +5,10 @@
 
 const NATIVE_HOST = "braindamage_steam_offers";
 
+const RELAYED_MESSAGE_TYPES = ["fetchOffers", "constructContract"];
+
 browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (!message || message.type !== "fetchOffers") return undefined;
+  if (!message || !RELAYED_MESSAGE_TYPES.includes(message.type)) return undefined;
 
   browser.runtime
     .sendNativeMessage(NATIVE_HOST, message.payload)

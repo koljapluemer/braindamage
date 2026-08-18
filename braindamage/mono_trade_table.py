@@ -22,11 +22,11 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import pricing, signals
+from . import pricing, signals, steam_fees
 from .market_names import market_hash_name
 from .models import Skin
 from .signals import now_utc
-from .tradeup import SELL_FEE_RATE, WEAR_BUCKETS, next_rarity, wear_for_float
+from .tradeup import WEAR_BUCKETS, next_rarity, wear_for_float
 
 REQUIRED_INPUTS = 10
 STEAM_LISTING_BASE_URL = "https://steamcommunity.com/market/listings/730/"
@@ -99,7 +99,10 @@ def _cheapest_ten_cost(skin_id: str, wear_name: str) -> tuple[float, datetime] |
 
 
 def _outcome_price_cell(skin_id: str, wear_name: str) -> dict:
-    """The best available sell-side price for one outcome skin at one wear:
+    """The best available NET sell-side price for one outcome skin at one
+    wear -- what you'd actually walk away with fulfilling that price on
+    Steam Community Market right now, after Steam's real per-sale fee (see
+    braindamage.steam_fees), not the raw gross buy-order/listing price:
     a buy-order-book summary if one's on disk (the best possible outcome
     price -- an instant sale, no listing needed), colored by its own age;
     otherwise whatever braindamage.pricing's general last-price resolution
@@ -108,13 +111,13 @@ def _outcome_price_cell(skin_id: str, wear_name: str) -> dict:
     buy_order = pricing.latest_buy_order_for_wear(skin_id, wear_name)
     if buy_order is not None:
         price, fetched_at, _num_orders = buy_order
-        return {"value": price, "color": _age_color(fetched_at), "source": "buy_order"}
+        return {"value": steam_fees.net_proceeds(price), "color": _age_color(fetched_at), "source": "buy_order"}
 
     price_info = pricing.latest_price_for_wear(skin_id, wear_name)
     if price_info is None:
         return {"value": None, "color": None, "source": None}
     price, _observed_at = price_info
-    return {"value": price, "color": "grey", "source": "fallback"}
+    return {"value": steam_fees.net_proceeds(price), "color": "grey", "source": "fallback"}
 
 
 def build_table(session: Session, skin: Skin) -> dict:
@@ -165,10 +168,10 @@ def build_table(session: Session, skin: Skin) -> dict:
         if input_cell["value"] is None:
             ev_cell = {"value": None}
         else:
+            # outcome_cells' values are already net of Steam's sell fee (see
+            # _outcome_price_cell) -- no fee applied again here.
             expected_revenue = sum(
-                probability * cell["value"] * (1 - SELL_FEE_RATE)
-                for cell in outcome_cells
-                if cell["value"] is not None
+                probability * cell["value"] for cell in outcome_cells if cell["value"] is not None
             )
             ev_cell = {"value": expected_revenue - input_cell["value"]}
 
