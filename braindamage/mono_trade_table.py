@@ -1,17 +1,17 @@
-"""Builds the mono-trade-up price table shown in the browser extension popup
-(webext/) for whichever skin the user currently has a Steam Community Market
-listing page open for -- one row per wear tier, one column per possible
-trade-up outcome skin at that collection/rarity, using whatever price/offer
-signals are already on disk (see braindamage/signals.py). Read-only: makes no
-network calls and writes nothing itself -- braindamage.steam_offers_host
-calls this right after it writes whatever the popup just scraped, so the
-table reflects that scrape immediately.
+"""Builds the mono-trade-up price table shown in the browser extension's
+sidebar (webext/) for whichever skin the user currently has a Steam
+Community Market listing page open for -- one row per wear tier, one column
+per possible trade-up outcome skin at that collection/rarity, using whatever
+price/offer signals are already on disk (see braindamage/signals.py).
+Read-only: makes no network calls and writes nothing itself --
+braindamage.steam_offers_host calls this right after it writes whatever the
+sidebar just scraped, so the table reflects that scrape immediately.
 
 Deliberately simpler than braindamage.tradeup's real simulator: every row
 prices its 10 inputs and every outcome at exactly that one wear bucket,
 ignoring the possibility of mixed input wears or an outcome float drifting
 into a neighboring wear bucket -- see spec.md for why that simplification is
-acceptable for this "at a glance" popup view.
+acceptable for this "at a glance" sidebar view.
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def _outcome_price_cell(skin_id: str, wear_name: str) -> dict:
 
 
 def build_table(session: Session, skin: Skin) -> dict:
-    """The full popup table for `skin`: one row per wear tier, with `skin`'s
+    """The full sidebar table for `skin`: one row per wear tier, with `skin`'s
     own buy-10-cost, every possible mono-trade outcome's price, and a
     per-row EV. Raises MonoTradeTableError if `skin` isn't a valid trade-up
     input at all, or its collection has no eligible output to trade into."""

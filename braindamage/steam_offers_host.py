@@ -60,11 +60,11 @@ def handle_message(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
     fallback for offers that didn't carry one.
 
     buy_order_summary is optional (Steam only renders that line once a wear
-    filter is active on the page -- see webext/popup.js) and shares the top-
-    level `currency`, since it's scraped off the same page as everything
+    filter is active on the page -- see webext/sidebar.js) and shares the
+    top-level `currency`, since it's scraped off the same page as everything
     else here. When present it's written as a BuyOrderSummarySignal.
 
-    On success, the reply also carries the popup's mono-trade price table
+    On success, the reply also carries the sidebar's mono-trade price table
     for the resolved skin (see braindamage.mono_trade_table) -- "table" is
     None with "table_error" explaining why if the skin isn't a usable
     trade-up input, e.g. a Covert (no next rarity) or an orphaned collection.

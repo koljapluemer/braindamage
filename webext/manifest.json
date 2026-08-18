@@ -1,17 +1,27 @@
 {
   "manifest_version": 3,
   "name": "braindamage Steam Offer Fetcher",
-  "version": "0.1.0",
-  "description": "Scrapes the currently open Steam Community Market listing page and sends it to the braindamage native host.",
+  "version": "0.2.0",
+  "description": "Docks a collapsible mono-trade price sidebar onto Steam Community Market listing pages and sends what it scrapes to the braindamage native host.",
   "browser_specific_settings": {
     "gecko": {
       "id": "steam-offers@braindamage.local"
     }
   },
   "action": {
-    "default_popup": "popup.html",
-    "default_title": "Fetch Steam Market offers"
+    "default_title": "Toggle braindamage sidebar"
   },
-  "permissions": ["nativeMessaging", "activeTab", "scripting"],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://steamcommunity.com/market/listings/*"],
+      "js": ["sidebar.js"],
+      "css": ["sidebar.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["nativeMessaging", "storage"],
   "host_permissions": ["*://steamcommunity.com/market/listings/*"]
 }

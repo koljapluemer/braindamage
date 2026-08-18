@@ -136,10 +136,25 @@ This registers the native messaging host with Firefox
 `webext/manifest.json`.
 
 **Usage:** open any Steam Community Market item listing page (e.g.
-`steamcommunity.com/market/listings/730/<item name>`), scroll to load as
-many rows as you want (only what's currently rendered gets scraped), and
-click the extension's toolbar button. It writes one `steam_offers.json` per
-skin under `data/skins/<skin_id>/`.
+`steamcommunity.com/market/listings/730/<item name>`). A sidebar docks
+itself to the right edge automatically -- no toolbar click needed -- scrapes
+the page, writes one `steam_offers.json` per skin under
+`data/skins/<skin_id>/`, and shows a price table for that skin's mono
+trade-up (cost to buy 10 at each wear, every possible outcome skin's price,
+and the resulting EV per wear). Scroll to load as many listing rows as you
+want first (only what's currently rendered gets scraped), then click
+**Refresh** in the sidebar to re-scrape.
+
+Click the extension's toolbar button to collapse the sidebar down to a thin
+strip (click the strip, or the sidebar's own `»` button, to bring it back);
+that state is remembered across page loads.
+
+If you also filter the page to one specific wear (Steam's own "Filters" →
+Exterior), the sidebar additionally picks up that wear's buy-order-book
+summary ("N requests to buy at $X or lower") and saves it to
+`buy_order_summary.json` -- the table then prefers that price (the best
+available *sell-side* signal, an instant sale with no listing needed) for
+every outcome skin it has one for.
 
 Two things worth knowing:
 - **Your Steam account currency must be USD or EUR.** This app assumes USD
