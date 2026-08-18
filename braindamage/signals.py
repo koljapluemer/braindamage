@@ -82,6 +82,27 @@ class MarketOfferSignal(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class SteamOfferSignal(BaseModel):
+    """One individual listing observed on a Steam Community Market item
+    listing page -- unlike MarketOfferSignal (CSFloat, has a real listing_id
+    and listing_type), Steam's page exposes no listing ID and everything
+    rendered there is buy-now by construction, so (float_value, pattern_seed,
+    price) stands in as a synthetic dedup identity instead (see
+    braindamage.steam_offer_combos). Append-only, written by the
+    steam_offers_host native-messaging host, one skin_id folder at a time --
+    the same skin_id scoping as MarketOfferSignal's market_offers.json."""
+
+    source: str = "steam"
+    market_hash_name: str
+    wear_name: str | None = None
+    float_value: float | None = None
+    pattern_seed: int | None = None
+    price: float
+    currency: str = "USD"
+    fetched_at: datetime
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
 class SkinEvent(BaseModel):
     """Reserved for future non-price signals (Valve announcements, streamer
     callouts, etc.). The shape is intentionally minimal — no writer exists yet."""
@@ -96,11 +117,13 @@ class SkinEvent(BaseModel):
 _PRICE_OBSERVATIONS_FILE = "price_observations.json"
 _AGGREGATED_PRICES_FILE = "aggregated_prices.json"
 _MARKET_OFFERS_FILE = "market_offers.json"
+_STEAM_OFFERS_FILE = "steam_offers.json"
 _EVENTS_FILE = "events.json"
 
 _price_observations_adapter = TypeAdapter(list[PriceObservationSignal])
 _aggregated_prices_adapter = TypeAdapter(list[AggregatedPriceSignal])
 _market_offers_adapter = TypeAdapter(list[MarketOfferSignal])
+_steam_offers_adapter = TypeAdapter(list[SteamOfferSignal])
 _events_adapter = TypeAdapter(list[SkinEvent])
 
 
@@ -151,6 +174,18 @@ def append_market_offers(skin_id: str, new_offers: list[MarketOfferSignal]) -> N
     existing = read_market_offers(skin_id)
     existing.extend(new_offers)
     _write(skin_id, _MARKET_OFFERS_FILE, _market_offers_adapter, existing)
+
+
+def read_steam_offers(skin_id: str) -> list[SteamOfferSignal]:
+    return _read(skin_id, _STEAM_OFFERS_FILE, _steam_offers_adapter)
+
+
+def append_steam_offers(skin_id: str, new_offers: list[SteamOfferSignal]) -> None:
+    if not new_offers:
+        return
+    existing = read_steam_offers(skin_id)
+    existing.extend(new_offers)
+    _write(skin_id, _STEAM_OFFERS_FILE, _steam_offers_adapter, existing)
 
 
 def read_events(skin_id: str) -> list[SkinEvent]:

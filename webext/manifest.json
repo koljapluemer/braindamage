@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "braindamage Steam Offer Fetcher",
+  "version": "0.1.0",
+  "description": "Scrapes the currently open Steam Community Market listing page and sends it to the braindamage native host.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "steam-offers@braindamage.local"
+    }
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Fetch Steam Market offers"
+  },
+  "permissions": ["nativeMessaging", "activeTab", "scripting"],
+  "host_permissions": ["*://steamcommunity.com/market/listings/*"]
+}

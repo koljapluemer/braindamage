@@ -1,0 +1,7 @@
+{
+  "name": "braindamage_steam_offers",
+  "description": "Writes scraped Steam Community Market offers to the braindamage app's on-disk data.",
+  "path": "__WRAPPER_PATH__",
+  "type": "stdio",
+  "allowed_extensions": ["steam-offers@braindamage.local"]
+}

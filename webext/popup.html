@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: system-ui, sans-serif; width: 280px; padding: 10px; }
+  button { width: 100%; padding: 8px; font-size: 0.95rem; cursor: pointer; }
+  #status { margin-top: 10px; font-size: 0.85rem; white-space: pre-wrap; }
+  .ok { color: #0ca30c; }
+  .err { color: #d03b3b; }
+  .hint { color: #898781; font-size: 0.78rem; margin-top: 8px; }
+</style>
+</head>
+<body>
+<button id="fetch-btn">Fetch offers from this page</button>
+<div id="status"></div>
+<div class="hint">Scroll the listing page to load as many rows as you want before clicking -- only what's
+currently rendered gets scraped. Requires your Steam account currency set to USD.</div>
+<script src="popup.js"></script>
+</body>
+</html>

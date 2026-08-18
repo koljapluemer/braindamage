@@ -72,6 +72,85 @@ to the same on-disk price signals and DB rows every other price-fetch action
 in this app uses, and is slow: multiple CSFloat requests per buying range,
 per shortlisted contract.
 
+## Finding cheap trade-up buy candidates
+
+To see what's currently cheap to *buy* for a mono trade-up, rather than
+simulate a specific contract, run:
+
+```bash
+uv run find_tradeup_buys.py
+```
+
+This fetches current CSFloat marketplace prices — via
+[SteamApis](https://docs.steamapis.com)'s Market Data API, not CSFloat's own
+API — for every normal (non-StatTrak) skin usable as a trade-up input, across
+every collection × rarity tier that isn't a dead end (i.e. has a valid output
+rarity to trade into), and writes a self-contained HTML report of the
+cheapest 3 skins per group. Pass `--top-n-per-group` to change that count, or
+`--no-open` to skip launching Firefox.
+
+Fetched prices are written to the same on-disk price signals and DB rows
+(`Skin.last_price`) every other price-fetch action in this app uses. If
+SteamApis errors partway through (rate limit, no connection, ...), the
+survey stops but keeps and reports whatever it already fetched rather than
+losing the run.
+
+Requires `STEAMAPIS_KEY` in `.env` (paid — see `.env.example`).
+
+## Finding buyable mono trade-up combos
+
+The reports above price inputs at an aggregate wear-bucket approximation.
+Once you've got real per-listing data on disk (via CSFloat postvalidation
+above, or the Steam Market scraper below), find the best *actually buyable
+right now* mono trade-up combos:
+
+```bash
+uv run find_mono_offer_combos.py         # from CSFloat listings (postvalidate_csfloat data)
+uv run find_steam_offer_combos.py        # from Steam Community Market listings
+```
+
+Both make no network calls of their own — they only read whatever's already
+on disk, deduplicate offers younger than 24h, and brute-force the highest
+real-expected-value way to pick exactly 10 of them per input skin, writing a
+self-contained HTML report of the top 3 (`--top-n` to change that count).
+Results can be negative-EV or overlap/mutually exclude each other — this is
+about seeing the best options as they stand, not a guaranteed executable plan.
+
+## Steam Market offer scraper
+
+`find_steam_offer_combos.py` above needs Steam Community Market listing data
+on disk first. That data comes from a small Firefox extension (`webext/`)
+plus a native-messaging host (`braindamage/steam_offers_host.py`) that writes
+what it scrapes straight into this app's normal on-disk signal files.
+
+**One-time setup:**
+
+```bash
+uv sync   # if you haven't already
+scripts/install_native_host.sh
+```
+
+This registers the native messaging host with Firefox
+(`~/.mozilla/native-messaging-hosts/`). Then load the extension itself: open
+`about:debugging` → "This Firefox" → "Load Temporary Add-on…" and select
+`webext/manifest.json`.
+
+**Usage:** open any Steam Community Market item listing page (e.g.
+`steamcommunity.com/market/listings/730/<item name>`), scroll to load as
+many rows as you want (only what's currently rendered gets scraped), and
+click the extension's toolbar button. It writes one `steam_offers.json` per
+skin under `data/skins/<skin_id>/`.
+
+Two things worth knowing:
+- **Your Steam account currency must be USD or EUR.** This app assumes USD
+  everywhere downstream (pricing, EV math); a EUR scrape is converted to USD
+  once, at write time, using a hand-maintained `EUR_USD_RATE` in `.env` (see
+  `.env.example` — update it by hand every so often). Any other currency is
+  rejected outright rather than silently mixed in.
+- Doppler/Gamma Doppler weapon skins (e.g. `Glock-18 | Gamma Doppler`) can't
+  be disambiguated by phase from Steam's listing name alone — the host
+  reports an "ambiguous" error for those rather than guessing.
+
 ## Tests
 
 ```bash
