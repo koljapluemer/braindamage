@@ -17,7 +17,7 @@
   "content_scripts": [
     {
       "matches": ["*://steamcommunity.com/market/listings/*"],
-      "js": ["sidebar.js"],
+      "js": ["vendor/vue.global.prod.js", "vendor/tailwind.js", "sidebar.js"],
       "css": ["sidebar.css"],
       "run_at": "document_idle"
     }

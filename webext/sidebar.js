@@ -1,7 +1,9 @@
-// Content script: injected automatically (see manifest.json content_scripts)
-// on every Steam Community Market listing page, docks a collapsible sidebar
-// to the right edge, and keeps it stocked with the mono-trade price table
-// for whichever skin that page is showing -- no popup click needed.
+// Content script: injected automatically (see manifest.json content_scripts,
+// which loads vendor/vue.global.prod.js and vendor/tailwind.js before this
+// file so the `Vue` and `tailwind` globals below are ready) on every Steam
+// Community Market listing page, docks a collapsible sidebar to the right
+// edge, and keeps it stocked with the mono-trade price table for whichever
+// skin that page is showing -- no popup click needed.
 //
 // Runs in an isolated world (Firefox content-script convention), so nothing
 // here can see or be seen by the page's own JS -- but browser.runtime
@@ -86,7 +88,7 @@
     const spans = document.querySelectorAll("span");
     for (const span of spans) {
       if (span.children.length > 0) continue;
-      const text = textOf(span).replace(/\u00a0/g, " ");
+      const text = textOf(span).replace(/ /g, " ");
       const m = text.match(re);
       if (!m) continue;
       const countStr = m[1].split(thousandsSep).join("");
@@ -215,9 +217,43 @@
     return response.reply;
   }
 
-  // --- Sidebar shell + rendering -------------------------------------------
+  // --- Tailwind setup --------------------------------------------------
+  // Scope every generated utility rule under "#bd-sidebar" (with
+  // !important) so it can never bleed onto Steam's own page, and disable
+  // Preflight so we don't reset margins/borders/etc. document-wide -- the
+  // sidebar relies on sidebar.css's `#bd-sidebar { all: initial }` for its
+  // own isolation from the page instead.
+  tailwind.config = {
+    important: "#bd-sidebar",
+    corePlugins: { preflight: false },
+  };
 
-  const els = {};
+  // --- Tiny hand-rolled state machine -----------------------------------
+  // Each machine is just {state, send, is}: `state` is a Vue ref holding
+  // the current state name, `send(event)` looks up transitions[state][event]
+  // and moves there (or is a no-op + console warning if that event isn't
+  // valid from the current state), `is(...states)` is a template-friendly
+  // membership check. No external FSM library -- this is the whole thing.
+  function createMachine(name, transitions, initial) {
+    const state = Vue.ref(initial);
+    function send(event) {
+      const next = transitions[state.value] && transitions[state.value][event];
+      if (!next) {
+        console.warn(`[bd-sidebar] ${name}: ignored "${event}" while in "${state.value}"`);
+        return false;
+      }
+      state.value = next;
+      return true;
+    }
+    function is(...states) {
+      return states.includes(state.value);
+    }
+    return { state, send, is };
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
 
   function fmtMoney(value) {
     if (value === null || value === undefined) return "—"; // em dash
@@ -225,384 +261,396 @@
     return `${sign}$${Math.abs(value).toFixed(2)}`;
   }
 
-  function setStatus(text, cls) {
-    els.status.textContent = text;
-    els.status.className = cls || "";
-  }
-
-  function makeHeaderCell(text) {
-    const th = document.createElement("th");
-    th.textContent = text;
-    return th;
-  }
-
-  function makeSkinHeaderCell(header) {
-    const th = document.createElement("th");
-    const a = document.createElement("a");
-    a.href = header.steam_url;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    a.textContent = header.skin_name;
-    th.appendChild(a);
-    return th;
-  }
-
-  function makePriceCell(cell) {
-    const td = document.createElement("td");
-    td.textContent = fmtMoney(cell.value);
-    if (cell.color) td.classList.add("bd-c-" + cell.color);
-    return td;
-  }
-
-  function renderTable(table) {
-    els.tableWrap.textContent = "";
-    if (!table) return;
-
-    const el = document.createElement("table");
-
-    const thead = document.createElement("thead");
-    const headRow = document.createElement("tr");
-    headRow.appendChild(makeHeaderCell("Wear"));
-    headRow.appendChild(makeSkinHeaderCell(table.input_header));
-    for (const header of table.outcome_headers) headRow.appendChild(makeSkinHeaderCell(header));
-    headRow.appendChild(makeHeaderCell("EV"));
-    thead.appendChild(headRow);
-    el.appendChild(thead);
-
-    const tbody = document.createElement("tbody");
-    for (const row of table.rows) {
-      const tr = document.createElement("tr");
-      const wearTd = document.createElement("td");
-      wearTd.textContent = row.wear_name;
-      tr.appendChild(wearTd);
-      tr.appendChild(makePriceCell(row.input_cell));
-      for (const cell of row.outcome_cells) tr.appendChild(makePriceCell(cell));
-      const evTd = makePriceCell(row.ev_cell);
-      evTd.classList.add("bd-ev-cell");
-      tr.appendChild(evTd);
-      tbody.appendChild(tr);
-    }
-    el.appendChild(tbody);
-    els.tableWrap.appendChild(el);
-  }
-
   function fmtPct(value) {
     if (value === null || value === undefined) return "—";
     return `${(value * 100).toFixed(1)}%`;
   }
 
-  function appendCells(tr, values) {
-    for (const value of values) {
-      const td = document.createElement("td");
-      td.textContent = value;
-      tr.appendChild(td);
-    }
+  function priceCellClass(cell) {
+    if (!cell || !cell.color) return "";
+    return (
+      {
+        purple: "bg-purple-500/40",
+        green: "bg-green-500/40",
+        orange: "bg-orange-500/40",
+        grey: "bg-gray-400/40",
+      }[cell.color] || ""
+    );
   }
 
-  // --- "Construct Contract" widget: the single best mono trade-up combo
-  // buildable from exactly what scrapePage() just found in the browser
-  // window, plus highlighting/scrolling to the 10 chosen listings on the
-  // page itself (see lastScrapeCardsByFloat above). ------------------------
+  const BTN_CLASS =
+    "bg-[#2a475e] text-[#c7d5e0] border border-white/20 rounded-sm px-2.5 py-1 text-[11px] cursor-pointer hover:bg-[#375875] disabled:opacity-50 disabled:cursor-default";
+  const TABLE_CLASS = "border-collapse w-full";
+  const TH_CLASS = "border border-white/10 px-2.5 py-1 text-center bg-[#1b2838] whitespace-nowrap";
+  const TD_CLASS = "border border-white/10 px-2.5 py-1 text-right whitespace-nowrap";
 
-  let contractOffers = []; // [{offer, element: Element | null}, ...] for the current contract, in order
-  let contractIndex = -1;
+  // --- Root Vue component ------------------------------------------------
 
-  function clearContractHighlights() {
-    for (const { element } of contractOffers) {
-      if (element) element.classList.remove("bd-highlight-card", "bd-highlight-current");
-    }
-  }
+  const SidebarApp = {
+    setup() {
+      const { ref, watch, onMounted, nextTick } = Vue;
 
-  function focusContractOffer(index) {
-    if (!contractOffers.length) return;
-    contractIndex = ((index % contractOffers.length) + contractOffers.length) % contractOffers.length;
-    for (const { element } of contractOffers) {
-      if (element) element.classList.remove("bd-highlight-current");
-    }
-    const current = contractOffers[contractIndex];
-    if (current.element) {
-      current.element.classList.add("bd-highlight-current");
-      current.element.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-    if (els.contractNavLabel) {
-      els.contractNavLabel.textContent = `${contractIndex + 1} / ${contractOffers.length}`;
-    }
-  }
-
-  function renderContractStatus(message, cls) {
-    clearContractHighlights();
-    contractOffers = [];
-    contractIndex = -1;
-    els.contractWrap.textContent = "";
-    const p = document.createElement("div");
-    p.className = "bd-inline-status " + (cls || "");
-    p.textContent = message;
-    els.contractWrap.appendChild(p);
-  }
-
-  function renderContract(contract) {
-    clearContractHighlights();
-
-    els.contractWrap.textContent = "";
-
-    const section = document.createElement("div");
-    section.id = "bd-contract";
-
-    const header = document.createElement("div");
-    header.className = "bd-contract-header";
-    const nameEl = document.createElement("strong");
-    nameEl.textContent = contract.stattrak ? `StatTrak™ ${contract.skin_name}` : contract.skin_name;
-    header.appendChild(nameEl);
-    const collectionEl = document.createElement("span");
-    collectionEl.className = "bd-contract-collection";
-    collectionEl.textContent = `— ${contract.collection_name} [${contract.rarity_name}]`;
-    header.appendChild(collectionEl);
-    const evBadge = document.createElement("span");
-    evBadge.className = "bd-contract-ev " + (contract.expected_value >= 0 ? "bd-ev-good" : "bd-ev-bad");
-    evBadge.textContent = `EV ${fmtMoney(contract.expected_value)}`;
-    header.appendChild(evBadge);
-    section.appendChild(header);
-
-    const metrics = document.createElement("div");
-    metrics.className = "bd-contract-metrics";
-    const metricDefs = [
-      ["Real cost (10 listings)", fmtMoney(contract.real_cost)],
-      ["Expected output value", fmtMoney(contract.expected_output_value)],
-      ["ROI", contract.roi === null ? "—" : fmtPct(contract.roi)],
-      ["Avg. normalized float", contract.avg_float.toFixed(4)],
-    ];
-    for (const [label, value] of metricDefs) {
-      const m = document.createElement("div");
-      m.className = "bd-metric";
-      const labelEl = document.createElement("span");
-      labelEl.className = "bd-metric-label";
-      labelEl.textContent = label;
-      const valueEl = document.createElement("span");
-      valueEl.textContent = value;
-      m.appendChild(labelEl);
-      m.appendChild(valueEl);
-      metrics.appendChild(m);
-    }
-    section.appendChild(metrics);
-
-    // Toggle-through-the-10-inputs nav -- scrolls the main Steam page to
-    // whichever of the 10 chosen listings is currently selected.
-    const nav = document.createElement("div");
-    nav.id = "bd-contract-nav";
-    const prevBtn = document.createElement("button");
-    prevBtn.type = "button";
-    prevBtn.textContent = "‹ Prev";
-    const nextBtn = document.createElement("button");
-    nextBtn.type = "button";
-    nextBtn.textContent = "Next ›";
-    const navLabel = document.createElement("span");
-    navLabel.id = "bd-contract-nav-label";
-    prevBtn.addEventListener("click", () => focusContractOffer(contractIndex - 1));
-    nextBtn.addEventListener("click", () => focusContractOffer(contractIndex + 1));
-    nav.appendChild(prevBtn);
-    nav.appendChild(navLabel);
-    nav.appendChild(nextBtn);
-    section.appendChild(nav);
-    els.contractNavLabel = navLabel;
-
-    const inputsLabel = document.createElement("h3");
-    inputsLabel.className = "bd-section-label";
-    inputsLabel.textContent = "The 10 listings to buy";
-    section.appendChild(inputsLabel);
-
-    const inputsTable = document.createElement("table");
-    inputsTable.innerHTML =
-      "<thead><tr><th>Wear</th><th>Float</th><th>Pattern</th><th>Price</th></tr></thead>";
-    const inputsBody = document.createElement("tbody");
-    inputsTable.appendChild(inputsBody);
-    section.appendChild(inputsTable);
-
-    const outcomesLabel = document.createElement("h3");
-    outcomesLabel.className = "bd-section-label";
-    outcomesLabel.textContent = "Possible outputs";
-    section.appendChild(outcomesLabel);
-
-    const outcomesTable = document.createElement("table");
-    outcomesTable.innerHTML =
-      "<thead><tr><th>Output</th><th>Collection</th><th>Chance</th><th>Wear</th><th>Net sell</th><th>Contribution</th></tr></thead>";
-    const outcomesBody = document.createElement("tbody");
-    for (const outcome of contract.outcomes) {
-      const tr = document.createElement("tr");
-      appendCells(tr, [
-        outcome.skin_name,
-        outcome.collection_name,
-        fmtPct(outcome.probability),
-        outcome.predicted_wear,
-        fmtMoney(outcome.net_price),
-        fmtMoney(outcome.contribution),
-      ]);
-      outcomesBody.appendChild(tr);
-    }
-    outcomesTable.appendChild(outcomesBody);
-    section.appendChild(outcomesTable);
-
-    els.contractWrap.appendChild(section);
-
-    // Match each chosen offer back to its card on the page (by float_value,
-    // the same synthetic identity braindamage.steam_offer_combos uses --
-    // see webext/sidebar.js's own scrapePage comment) and highlight it.
-    contractOffers = contract.offers.map((offer) => ({
-      offer,
-      element: lastScrapeCardsByFloat.get(offer.float_value) || null,
-    }));
-    for (const { element } of contractOffers) {
-      if (element) element.classList.add("bd-highlight-card");
-    }
-    for (let i = 0; i < contractOffers.length; i++) {
-      const tr = document.createElement("tr");
-      if (!contractOffers[i].element) tr.classList.add("bd-offer-not-found");
-      const offer = contractOffers[i].offer;
-      appendCells(tr, [
-        offer.wear_name || "—",
-        offer.float_value.toFixed(6),
-        offer.pattern_seed === null || offer.pattern_seed === undefined ? "—" : offer.pattern_seed,
-        fmtMoney(offer.price),
-      ]);
-      tr.addEventListener("click", () => focusContractOffer(i));
-      inputsBody.appendChild(tr);
-    }
-
-    focusContractOffer(0);
-  }
-
-  async function runConstructContract(scraped) {
-    if (!scraped.offers.length) {
-      renderContractStatus("No listings found on this page yet -- try Refresh once it's finished loading.", "err");
-      return;
-    }
-    if (!scraped.currency) {
-      renderContractStatus("Could not detect the page's currency -- refusing to send (this app assumes USD).", "err");
-      return;
-    }
-
-    els.constructBtn.disabled = true;
-    renderContractStatus("Constructing contract from what's on this page right now...");
-    try {
-      const reply = await sendConstructContractToHost(scraped);
-      if (!reply.ok) {
-        renderContractStatus(reply.error, "err");
-        return;
-      }
-      renderContract(reply.contract);
-    } catch (e) {
-      renderContractStatus("Could not reach the native host: " + e.message, "err");
-    } finally {
-      els.constructBtn.disabled = false;
-    }
-  }
-
-  function setCollapsed(collapsed, { persist = true } = {}) {
-    els.root.classList.toggle("bd-collapsed", collapsed);
-    if (persist) browser.storage.local.set({ bdSidebarCollapsed: collapsed });
-  }
-
-  function renderShell() {
-    const root = document.createElement("div");
-    root.id = "bd-sidebar";
-    root.innerHTML = `
-      <div id="bd-strip" title="Open braindamage sidebar">braindamage</div>
-      <div id="bd-panel">
-        <div id="bd-header">
-          <strong>braindamage</strong>
-          <button id="bd-refresh" type="button">Refresh</button>
-          <button id="bd-construct" type="button" title="Run the buy combo search on just what's visible on this page right now">Construct Contract</button>
-          <button id="bd-collapse" type="button" title="Collapse">&raquo;</button>
-        </div>
-        <div id="bd-status"></div>
-        <div id="bd-table-wrap"></div>
-        <div id="bd-contract-wrap"></div>
-      </div>
-    `;
-    document.documentElement.appendChild(root);
-
-    els.root = root;
-    els.strip = root.querySelector("#bd-strip");
-    els.status = root.querySelector("#bd-status");
-    els.tableWrap = root.querySelector("#bd-table-wrap");
-    els.contractWrap = root.querySelector("#bd-contract-wrap");
-    els.refreshBtn = root.querySelector("#bd-refresh");
-    els.constructBtn = root.querySelector("#bd-construct");
-    els.collapseBtn = root.querySelector("#bd-collapse");
-
-    els.strip.addEventListener("click", () => setCollapsed(false));
-    els.collapseBtn.addEventListener("click", () => setCollapsed(true));
-    els.refreshBtn.addEventListener("click", () => runFetchAndRender(scrapePage()));
-    els.constructBtn.addEventListener("click", () => runConstructContract(scrapePage()));
-
-    browser.storage.local.get("bdSidebarCollapsed").then((stored) => {
-      setCollapsed(Boolean(stored.bdSidebarCollapsed), { persist: false });
-    });
-  }
-
-  // --- Fetch + render flow --------------------------------------------------
-
-  async function runFetchAndRender(scraped) {
-    if (!scraped.offers.length) {
-      setStatus("No listings found on this page yet -- try Refresh once it's finished loading.", "err");
-      return;
-    }
-    if (!scraped.currency) {
-      setStatus("Could not detect the page's currency -- refusing to send (this app assumes USD).", "err");
-      return;
-    }
-
-    setStatus("Working...");
-    let reply;
-    try {
-      reply = await sendScrapeToHost(scraped);
-    } catch (e) {
-      setStatus(
-        "Could not reach the native host: " + e.message + "\n(is it installed? see scripts/install_native_host.sh)",
-        "err"
+      // -- collapsed/expanded, persisted across page loads --------------
+      const sidebar = createMachine(
+        "sidebar",
+        {
+          collapsed: { toggle: "expanded" },
+          expanded: { toggle: "collapsed" },
+        },
+        "expanded"
       );
-      return;
-    }
+      browser.storage.local.get("bdSidebarCollapsed").then((stored) => {
+        sidebar.state.value = stored.bdSidebarCollapsed ? "collapsed" : "expanded";
+      });
+      watch(sidebar.state, (value) => {
+        browser.storage.local.set({ bdSidebarCollapsed: value === "collapsed" });
+      });
 
-    if (!reply.ok) {
-      setStatus(reply.error, "err");
-      return;
-    }
+      // -- main price table ------------------------------------------------
+      const fetchFsm = createMachine(
+        "fetch",
+        {
+          idle: { start: "loading" },
+          loading: { succeed: "ready", fail: "error" },
+          ready: { start: "loading" },
+          error: { start: "loading" },
+        },
+        "idle"
+      );
+      const fetchStatus = ref("");
+      const table = ref(null);
 
-    let statusText = `Saved ${reply.written} offer(s) for ${reply.skin_name}.`;
-    if (reply.buy_order_written) statusText += " Buy order summary saved.";
-    if (reply.table_error) statusText += "\n" + reply.table_error;
-    setStatus(statusText, "ok");
-    renderTable(reply.table);
-  }
+      async function runFetchAndRender(scraped) {
+        fetchFsm.send("start");
+        if (!scraped.offers.length) {
+          fetchStatus.value = "No listings found on this page yet -- try Refresh once it's finished loading.";
+          fetchFsm.send("fail");
+          return;
+        }
+        if (!scraped.currency) {
+          fetchStatus.value = "Could not detect the page's currency -- refusing to send (this app assumes USD).";
+          fetchFsm.send("fail");
+          return;
+        }
 
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
+        fetchStatus.value = "Working...";
+        let reply;
+        try {
+          reply = await sendScrapeToHost(scraped);
+        } catch (e) {
+          fetchStatus.value =
+            "Could not reach the native host: " + e.message + "\n(is it installed? see scripts/install_native_host.sh)";
+          fetchFsm.send("fail");
+          return;
+        }
 
-  // The page is a heavy SPA -- document_idle can fire before its listing
-  // rows have actually rendered, so the very first scrape polls for a
-  // little while rather than reporting a false "no listings" on every page
-  // load. A manual Refresh (after the user scrolls to load more, or
-  // changes the wear filter) always scrapes exactly once, immediately.
-  async function autoInit() {
-    setStatus("Loading...");
-    for (let attempt = 0; attempt < 12; attempt++) {
-      const scraped = scrapePage();
-      if (scraped.offers.length > 0) {
-        await runFetchAndRender(scraped);
-        return;
+        if (!reply.ok) {
+          fetchStatus.value = reply.error;
+          fetchFsm.send("fail");
+          return;
+        }
+
+        let statusText = `Saved ${reply.written} offer(s) for ${reply.skin_name}.`;
+        if (reply.buy_order_written) statusText += " Buy order summary saved.";
+        if (reply.table_error) statusText += "\n" + reply.table_error;
+        fetchStatus.value = statusText;
+        table.value = reply.table;
+        fetchFsm.send("succeed");
       }
-      await sleep(1000);
-    }
-    setStatus("Could not find any listings on this page yet -- try Refresh.", "err");
-  }
 
-  renderShell();
-  autoInit();
+      // The page is a heavy SPA -- document_idle can fire before its listing
+      // rows have actually rendered, so the very first scrape polls for a
+      // little while rather than reporting a false "no listings" on every
+      // page load. A manual Refresh (after the user scrolls to load more,
+      // or changes the wear filter) always scrapes exactly once, immediately.
+      async function autoInit() {
+        fetchStatus.value = "Loading...";
+        for (let attempt = 0; attempt < 12; attempt++) {
+          const scraped = scrapePage();
+          if (scraped.offers.length > 0) {
+            await runFetchAndRender(scraped);
+            return;
+          }
+          await sleep(1000);
+        }
+        fetchFsm.send("start");
+        fetchStatus.value = "Could not find any listings on this page yet -- try Refresh.";
+        fetchFsm.send("fail");
+      }
+
+      // -- "Construct Contract" widget: the single best mono trade-up combo
+      // buildable from exactly what scrapePage() just found in the browser
+      // window, plus highlighting/scrolling to the chosen listings on the
+      // page itself (see lastScrapeCardsByFloat above). --------------------
+      const contractFsm = createMachine(
+        "contract",
+        {
+          idle: { start: "loading" },
+          loading: { succeed: "ready", fail: "error" },
+          ready: { start: "loading" },
+          error: { start: "loading" },
+        },
+        "idle"
+      );
+      const contractStatus = ref("");
+      const contract = ref(null);
+      const contractOffers = ref([]); // [{offer, element: Element | null}, ...]
+      const contractIndex = ref(-1);
+
+      function clearContractHighlights() {
+        for (const { element } of contractOffers.value) {
+          if (element) element.classList.remove("bd-highlight-card", "bd-highlight-current");
+        }
+      }
+
+      function focusContractOffer(index) {
+        if (!contractOffers.value.length) return;
+        const n = contractOffers.value.length;
+        contractIndex.value = ((index % n) + n) % n;
+        for (const { element } of contractOffers.value) {
+          if (element) element.classList.remove("bd-highlight-current");
+        }
+        const current = contractOffers.value[contractIndex.value];
+        if (current.element) {
+          current.element.classList.add("bd-highlight-current");
+          current.element.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }
+
+      async function runConstructContract(scraped) {
+        contractFsm.send("start");
+        clearContractHighlights();
+        contractOffers.value = [];
+        contractIndex.value = -1;
+        contract.value = null;
+
+        if (!scraped.offers.length) {
+          contractStatus.value = "No listings found on this page yet -- try Refresh once it's finished loading.";
+          contractFsm.send("fail");
+          return;
+        }
+        if (!scraped.currency) {
+          contractStatus.value = "Could not detect the page's currency -- refusing to send (this app assumes USD).";
+          contractFsm.send("fail");
+          return;
+        }
+
+        contractStatus.value = "Constructing contract from what's on this page right now...";
+        try {
+          const reply = await sendConstructContractToHost(scraped);
+          if (!reply.ok) {
+            contractStatus.value = reply.error;
+            contractFsm.send("fail");
+            return;
+          }
+          contract.value = reply.contract;
+          // Match each chosen offer back to its card on the page (by
+          // float_value, the same synthetic identity
+          // braindamage.steam_offer_combos uses -- see scrapePage above)
+          // and highlight it.
+          contractOffers.value = reply.contract.offers.map((offer) => ({
+            offer,
+            element: lastScrapeCardsByFloat.get(offer.float_value) || null,
+          }));
+          for (const { element } of contractOffers.value) {
+            if (element) element.classList.add("bd-highlight-card");
+          }
+          contractFsm.send("succeed");
+          await nextTick();
+          focusContractOffer(0);
+        } catch (e) {
+          contractStatus.value = "Could not reach the native host: " + e.message;
+          contractFsm.send("fail");
+        }
+      }
+
+      onMounted(autoInit);
+
+      return {
+        sidebar,
+        toggleSidebar: () => sidebar.send("toggle"),
+        fetchFsm,
+        fetchStatus,
+        table,
+        refresh: () => runFetchAndRender(scrapePage()),
+        contractFsm,
+        contractStatus,
+        contract,
+        contractOffers,
+        contractIndex,
+        construct: () => runConstructContract(scrapePage()),
+        focusContractOffer,
+        fmtMoney,
+        fmtPct,
+        priceCellClass,
+        btnClass: BTN_CLASS,
+        tableClass: TABLE_CLASS,
+        thClass: TH_CLASS,
+        tdClass: TD_CLASS,
+      };
+    },
+
+    template: `
+      <div v-show="sidebar.is('collapsed')"
+           @click="toggleSidebar"
+           title="Open braindamage sidebar"
+           class="w-[26px] h-full bg-[#1b2838] text-[#c7d5e0] border-l border-white/15 flex items-center justify-center cursor-pointer select-none tracking-wide py-2.5 hover:bg-[#24374c]"
+           style="writing-mode: vertical-rl; text-orientation: mixed;">
+        braindamage
+      </div>
+
+      <div v-show="sidebar.is('expanded')"
+           class="block w-fit max-w-[min(920px,92vw)] max-h-full overflow-auto bg-[#171a21] text-[#c7d5e0] border-l border-white/15 shadow-[-6px_0_16px_rgba(0,0,0,0.45)] p-2.5 px-3">
+
+        <div class="flex items-center gap-2 whitespace-nowrap">
+          <strong class="flex-1 text-[#66c0f4] text-[13px]">braindamage</strong>
+          <button type="button" :class="btnClass" :disabled="fetchFsm.is('loading')" @click="refresh">Refresh</button>
+          <button type="button" :class="btnClass" :disabled="contractFsm.is('loading')" @click="construct"
+                  title="Run the buy combo search on just what's visible on this page right now">
+            Construct Contract
+          </button>
+          <button type="button" :class="btnClass" title="Collapse" @click="toggleSidebar">&raquo;</button>
+        </div>
+
+        <div class="mt-2 whitespace-pre-wrap text-[11px] min-h-[1em]"
+             :class="{ 'text-[#6fd06f]': fetchFsm.is('ready'), 'text-[#ff6b6b]': fetchFsm.is('error') }">
+          {{ fetchStatus }}
+        </div>
+
+        <div v-if="table" class="mt-2.5 overflow-x-auto">
+          <table :class="tableClass">
+            <thead>
+              <tr>
+                <th :class="thClass + ' text-left'">Wear</th>
+                <th :class="thClass">
+                  <a :href="table.input_header.steam_url" target="_blank" rel="noopener noreferrer" class="text-[#66c0f4] no-underline hover:underline">
+                    {{ table.input_header.skin_name }}
+                  </a>
+                </th>
+                <th v-for="header in table.outcome_headers" :key="header.skin_id" :class="thClass">
+                  <a :href="header.steam_url" target="_blank" rel="noopener noreferrer" class="text-[#66c0f4] no-underline hover:underline">
+                    {{ header.skin_name }}
+                  </a>
+                </th>
+                <th :class="thClass">EV</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in table.rows" :key="row.wear_name">
+                <td :class="tdClass + ' text-left'">{{ row.wear_name }}</td>
+                <td :class="[tdClass, priceCellClass(row.input_cell)]">{{ fmtMoney(row.input_cell.value) }}</td>
+                <td v-for="(cell, i) in row.outcome_cells" :key="i" :class="[tdClass, priceCellClass(cell)]">
+                  {{ fmtMoney(cell.value) }}
+                </td>
+                <td :class="[tdClass, priceCellClass(row.ev_cell), 'font-bold']">{{ fmtMoney(row.ev_cell.value) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="mt-2.5">
+          <div v-if="contractFsm.is('idle', 'loading', 'error')" class="whitespace-pre-wrap text-[11px]"
+               :class="{ 'text-[#ff6b6b]': contractFsm.is('error') }">
+            {{ contractStatus }}
+          </div>
+
+          <div v-else-if="contract">
+            <div class="flex items-center gap-2 flex-wrap text-[13px]">
+              <strong>{{ contract.stattrak ? 'StatTrak™ ' + contract.skin_name : contract.skin_name }}</strong>
+              <span class="text-[#8f98a0] font-normal">— {{ contract.collection_name }} [{{ contract.rarity_name }}]</span>
+              <span class="ml-auto font-bold" :class="contract.expected_value >= 0 ? 'text-[#6fd06f]' : 'text-[#ff6b6b]'">
+                EV {{ fmtMoney(contract.expected_value) }}
+              </span>
+            </div>
+
+            <div class="flex gap-4 flex-wrap mt-2 mb-1">
+              <div class="flex flex-col">
+                <span class="text-[#8f98a0] text-[10px]">Real cost (10 listings)</span>
+                <span>{{ fmtMoney(contract.real_cost) }}</span>
+              </div>
+              <div class="flex flex-col">
+                <span class="text-[#8f98a0] text-[10px]">Expected output value</span>
+                <span>{{ fmtMoney(contract.expected_output_value) }}</span>
+              </div>
+              <div class="flex flex-col">
+                <span class="text-[#8f98a0] text-[10px]">ROI</span>
+                <span>{{ contract.roi === null ? '—' : fmtPct(contract.roi) }}</span>
+              </div>
+              <div class="flex flex-col">
+                <span class="text-[#8f98a0] text-[10px]">Avg. normalized float</span>
+                <span>{{ contract.avg_float.toFixed(4) }}</span>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2 my-2">
+              <button type="button" :class="btnClass" @click="focusContractOffer(contractIndex - 1)">&lsaquo; Prev</button>
+              <span class="tabular-nums">{{ contractIndex + 1 }} / {{ contractOffers.length }}</span>
+              <button type="button" :class="btnClass" @click="focusContractOffer(contractIndex + 1)">Next &rsaquo;</button>
+            </div>
+
+            <h3 class="text-[11px] uppercase tracking-wide text-[#8f98a0] mt-3 mb-1">The 10 listings to buy</h3>
+            <table :class="tableClass">
+              <thead>
+                <tr>
+                  <th :class="thClass">Wear</th>
+                  <th :class="thClass">Float</th>
+                  <th :class="thClass">Pattern</th>
+                  <th :class="thClass">Price</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(entry, i) in contractOffers" :key="i"
+                    class="cursor-pointer hover:bg-[#66c0f4]/15"
+                    :class="{ 'opacity-60': !entry.element }"
+                    @click="focusContractOffer(i)">
+                  <td :class="tdClass">{{ entry.offer.wear_name || '—' }}</td>
+                  <td :class="tdClass">{{ entry.offer.float_value.toFixed(6) }}</td>
+                  <td :class="tdClass">{{ entry.offer.pattern_seed === null || entry.offer.pattern_seed === undefined ? '—' : entry.offer.pattern_seed }}</td>
+                  <td :class="tdClass">{{ fmtMoney(entry.offer.price) }}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h3 class="text-[11px] uppercase tracking-wide text-[#8f98a0] mt-3 mb-1">Possible outputs</h3>
+            <table :class="tableClass">
+              <thead>
+                <tr>
+                  <th :class="thClass">Output</th>
+                  <th :class="thClass">Collection</th>
+                  <th :class="thClass">Chance</th>
+                  <th :class="thClass">Wear</th>
+                  <th :class="thClass">Net sell</th>
+                  <th :class="thClass">Contribution</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(outcome, i) in contract.outcomes" :key="i">
+                  <td :class="tdClass">{{ outcome.skin_name }}</td>
+                  <td :class="tdClass">{{ outcome.collection_name }}</td>
+                  <td :class="tdClass">{{ fmtPct(outcome.probability) }}</td>
+                  <td :class="tdClass">{{ outcome.predicted_wear }}</td>
+                  <td :class="tdClass">{{ fmtMoney(outcome.net_price) }}</td>
+                  <td :class="tdClass">{{ fmtMoney(outcome.contribution) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `,
+  };
+
+  // --- Mount ---------------------------------------------------------------
+
+  const container = document.createElement("div");
+  container.id = "bd-sidebar";
+  document.documentElement.appendChild(container);
+
+  const vm = Vue.createApp(SidebarApp).mount(container);
 
   browser.runtime.onMessage.addListener((message) => {
     if (message && message.type === "toggleSidebar") {
-      setCollapsed(!els.root.classList.contains("bd-collapsed"));
+      vm.toggleSidebar();
     }
   });
 })();
