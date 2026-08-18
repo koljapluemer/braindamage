@@ -103,6 +103,11 @@ def _validate_and_prepare(session: Session, payload: dict[str, Any]) -> _Prepare
         }
     skin = matches[0]
 
+    # One shared timestamp for every offer in this scrape, not signals.now_utc()
+    # called per-offer -- mono_trade_table groups offers into "batches" (one
+    # page scrape) by exact fetched_at equality, so entries from the same
+    # scrape must carry an identical timestamp.
+    fetched_at = signals.now_utc()
     entries = []
     for offer in offers:
         original_price = offer["price"]
@@ -120,7 +125,7 @@ def _validate_and_prepare(session: Session, payload: dict[str, Any]) -> _Prepare
                 pattern_seed=offer.get("pattern_seed"),
                 price=usd_price,
                 currency="USD",
-                fetched_at=signals.now_utc(),
+                fetched_at=fetched_at,
                 raw=raw,
             )
         )

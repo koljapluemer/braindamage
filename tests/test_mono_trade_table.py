@@ -108,20 +108,55 @@ class TestBuildTableRows:
         assert row["input_cell"] == {"value": None, "color": None}
         assert row["ev_cell"] == {"value": None}
 
-    def test_input_cell_sums_cheapest_ten_and_colors_by_oldest(self, session):
+    def test_input_cell_uses_latest_batch_only_when_it_has_enough_offers(self, session):
         skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
         _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
         old = now_utc() - timedelta(days=2)
-        # 10 cheap+old offers, plus 2 expensive+fresh ones that shouldn't be
-        # picked (only the 10 cheapest count).
+        # 10 cheap+old offers, then a fresh full batch of 10 pricier ones for
+        # the same 10 listings -- the fresh batch alone has enough inputs, so
+        # the stale cheap prices must be ignored entirely, value and color
+        # both reflecting only the latest scrape.
+        _offers("in-a", "Field-Tested", [1.0] * 10, fetched_at=old)
+        _offers("in-a", "Field-Tested", [50.0] * 10, fetched_at=now_utc())
+
+        table = mono_trade_table.build_table(session, skin)
+
+        row = next(r for r in table["rows"] if r["wear_name"] == "Field-Tested")
+        assert row["input_cell"]["value"] == pytest.approx(500.0)
+        assert row["input_cell"]["color"] == "purple"
+
+    def test_input_cell_tops_up_shortfall_from_older_offers_when_batch_is_short(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        old = now_utc() - timedelta(days=2)
+        # 10 cheap+old offers, plus a small fresh batch of only 2 -- not
+        # enough on its own, so the shortfall (8) is topped up from the
+        # cheapest remaining older offers, and the color reflects that oldest
+        # data actually used, not the fresh batch's own age.
         _offers("in-a", "Field-Tested", [1.0] * 10, fetched_at=old)
         _offers("in-a", "Field-Tested", [99.0, 99.0], fetched_at=now_utc())
 
         table = mono_trade_table.build_table(session, skin)
 
         row = next(r for r in table["rows"] if r["wear_name"] == "Field-Tested")
-        assert row["input_cell"]["value"] == pytest.approx(10.0)
+        # The fresh batch's 2 offers collide (same float/pattern-seed
+        # identity, see _offers) with 2 of the 10 old ones, so those 2 old
+        # observations are excluded from the top-up pool -- 8 old offers
+        # remain, exactly filling the shortfall.
+        assert row["input_cell"]["value"] == pytest.approx(2 * 99.0 + 8 * 1.0)
         assert row["input_cell"]["color"] == "orange"
+
+    def test_input_cell_is_none_when_batch_plus_topup_still_short(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        old = now_utc() - timedelta(days=2)
+        _offers("in-a", "Field-Tested", [1.0] * 3, fetched_at=old)
+        _offers("in-a", "Field-Tested", [50.0] * 3, fetched_at=now_utc())
+
+        table = mono_trade_table.build_table(session, skin)
+
+        row = next(r for r in table["rows"] if r["wear_name"] == "Field-Tested")
+        assert row["input_cell"] == {"value": None, "color": None}
 
     def test_dedups_offers_by_float_pattern_price_keeping_latest(self, session):
         skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")

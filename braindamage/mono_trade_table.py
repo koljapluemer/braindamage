@@ -69,33 +69,76 @@ def _age_color(fetched_at: datetime) -> str:
     return "orange"
 
 
+def _listing_key(offer: signals.SteamOfferSignal) -> tuple[float | None, int | None, float]:
+    """Synthetic per-offer dedup identity -- see SteamOfferSignal's docstring.
+    Includes price, so re-observing the exact same listing at a changed price
+    doesn't collapse the two observations into one (the caller decides which
+    one wins)."""
+    return (offer.float_value, offer.pattern_seed, offer.price)
+
+
+def _listing_identity(offer: signals.SteamOfferSignal) -> tuple:
+    """Same physical-listing identity as _listing_key but *without* price, so
+    a listing re-observed at a different price is still recognized as "the
+    same listing" -- used to keep an older, cheaper observation of a listing
+    that's already present in the latest batch from being double-counted.
+    Floatless items (no float_value) have no such stable identity, so they
+    fall back to the price-inclusive key instead."""
+    if offer.float_value is not None:
+        return (offer.float_value, offer.pattern_seed)
+    return _listing_key(offer)
+
+
 def _cheapest_ten_cost(skin_id: str, wear_name: str) -> tuple[float, datetime] | None:
-    """Sum of the 10 cheapest Steam offers on disk for `skin_id` at
-    `wear_name`, plus the oldest fetch time among those 10 (the cell's
-    color is keyed off the *oldest* data point used, not the newest, so the
-    color reflects the staleness of the whole calculation) -- None if fewer
-    than REQUIRED_INPUTS offers are on disk for that wear.
+    """Cost to buy REQUIRED_INPUTS offers of `skin_id` at `wear_name` right
+    now, plus the oldest fetch time among the offers actually used (the
+    cell's color is keyed off that oldest point, not the newest, so the
+    color reflects the staleness of the whole calculation) -- None if there
+    still aren't enough offers on disk for that wear even after the fallback
+    below.
 
-    Offers are deduped by (float_value, pattern_seed, price), the same
-    synthetic identity braindamage.steam_offer_combos uses, keeping each
-    key's most-recently-fetched snapshot. Unlike that module, this applies no
-    freshness cutoff: the point of this table is "what's on disk right now,
-    however stale", colored by age rather than silently dropped.
+    Prices from the *latest scrape batch* (offers sharing the same
+    fetched_at -- one page refresh, see steam_offers_host) whenever that
+    batch alone has REQUIRED_INPUTS offers, so the value and its color
+    reflect exactly what the last refresh showed, undistorted by however
+    cheap some long-gone listing used to be. Only when the latest batch falls
+    short does it top up the remaining slots with the cheapest older offers
+    on disk (excluding any listing already represented in the batch), same
+    as this table always has -- see spec.md.
     """
-    latest_by_key: dict[tuple[float | None, int | None, float], signals.SteamOfferSignal] = {}
-    for offer in signals.read_steam_offers(skin_id):
-        if offer.wear_name != wear_name:
-            continue
-        key = (offer.float_value, offer.pattern_seed, offer.price)
-        existing = latest_by_key.get(key)
-        if existing is None or offer.fetched_at > existing.fetched_at:
-            latest_by_key[key] = offer
-
-    offers = sorted(latest_by_key.values(), key=lambda o: o.price)
-    if len(offers) < REQUIRED_INPUTS:
+    offers = [o for o in signals.read_steam_offers(skin_id) if o.wear_name == wear_name]
+    if not offers:
         return None
-    cheapest = offers[:REQUIRED_INPUTS]
-    return sum(o.price for o in cheapest), min(o.fetched_at for o in cheapest)
+
+    latest_fetched_at = max(o.fetched_at for o in offers)
+    batch = [o for o in offers if o.fetched_at == latest_fetched_at]
+    older = [o for o in offers if o.fetched_at != latest_fetched_at]
+
+    batch_by_key: dict[tuple, signals.SteamOfferSignal] = {}
+    for offer in batch:
+        batch_by_key[_listing_key(offer)] = offer
+    batch_offers = sorted(batch_by_key.values(), key=lambda o: o.price)
+
+    if len(batch_offers) >= REQUIRED_INPUTS:
+        cheapest = batch_offers[:REQUIRED_INPUTS]
+        return sum(o.price for o in cheapest), latest_fetched_at
+
+    batch_identities = {_listing_identity(o) for o in batch_offers}
+    older_by_key: dict[tuple, signals.SteamOfferSignal] = {}
+    for offer in older:
+        if _listing_identity(offer) in batch_identities:
+            continue
+        key = _listing_key(offer)
+        existing = older_by_key.get(key)
+        if existing is None or offer.fetched_at > existing.fetched_at:
+            older_by_key[key] = offer
+
+    shortfall = REQUIRED_INPUTS - len(batch_offers)
+    topped_up = sorted(older_by_key.values(), key=lambda o: o.price)[:shortfall]
+    selected = batch_offers + topped_up
+    if len(selected) < REQUIRED_INPUTS:
+        return None
+    return sum(o.price for o in selected), min(o.fetched_at for o in selected)
 
 
 def _outcome_price_cell(
