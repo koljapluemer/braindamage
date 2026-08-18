@@ -63,6 +63,21 @@ def latest_prices_by_wear(skin_id: str) -> dict[str, tuple[float, datetime]]:
     return best
 
 
+def latest_buy_order_for_wear(skin_id: str, wear_name: str) -> tuple[float, datetime, int] | None:
+    """Latest (price, fetched_at, num_orders) buy-order-book summary for
+    `skin_id` at `wear_name`, or None if there isn't one -- see
+    signals.BuyOrderSummarySignal. Deliberately kept separate from
+    latest_price_for_wear/_all_candidates: a buy-order price is a distinct,
+    more specific signal (what a seller could get RIGHT NOW without waiting
+    on a listing to sell), not folded into the general last-price resolution
+    the rest of the app (contract simulation, Skin.last_price) relies on."""
+    entries = [e for e in signals.read_buy_order_summaries(skin_id) if e.wear_name == wear_name]
+    if not entries:
+        return None
+    latest = max(entries, key=lambda e: e.fetched_at)
+    return latest.price, latest.fetched_at, latest.num_orders
+
+
 def recalculate_last_price(skin: Skin) -> None:
     """Refreshes `skin.last_price` and its timestamps from this skin's own signal
     files (latest observation across all wears combined). Mutates `skin` in

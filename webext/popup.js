@@ -78,6 +78,54 @@ function scrapeListingPage() {
     return sibling ? textOf(sibling) : null;
   }
 
+  // Buy-order-book summary ("2.302 requests to buy at €143,65 or lower") --
+  // Steam only renders this line once a wear filter is active on the page
+  // (unfiltered, the page shows all 5 wear cards and no such summary), so
+  // finding it is best-effort: search every leaf span's text for the
+  // pattern rather than any specific (hashed, unstable) class name, same
+  // philosophy as the rest of this scraper. Number formatting follows the
+  // page's locale like the price parsing above -- but here in OPPOSITE
+  // roles: a EUR-locale page uses '.' as the *count*'s thousands separator
+  // and ',' as the *price*'s decimal separator, while a USD-locale page
+  // uses ',' for the count's thousands and '.' for the price's decimal.
+  function findBuyOrderSummary(currency) {
+    if (currency !== "USD" && currency !== "EUR") return null;
+    const thousandsSep = currency === "EUR" ? "." : ",";
+    const decimalSep = currency === "EUR" ? "," : ".";
+    const re = /([\d.,]+)\s+requests?\s+to\s+buy\s+at\s+[^\d\s]*\s*([\d.,]+)\s+or\s+lower/i;
+    const spans = document.querySelectorAll("span");
+    for (const span of spans) {
+      if (span.children.length > 0) continue;
+      const text = textOf(span).replace(/\u00a0/g, " ");
+      const m = text.match(re);
+      if (!m) continue;
+      const countStr = m[1].split(thousandsSep).join("");
+      const priceStr = m[2].split(thousandsSep).join("").replace(decimalSep, ".");
+      const numOrders = parseInt(countStr, 10);
+      const price = parseFloat(priceStr);
+      if (Number.isNaN(numOrders) || Number.isNaN(price)) continue;
+      return { num_orders: numOrders, price };
+    }
+    return null;
+  }
+
+  // Which wear the page is currently filtered to, if any -- read from the
+  // "Exterior: <wear>" active-filter chip Steam's Filters UI renders. Same
+  // best-effort, text-not-class matching as everything else here; this is
+  // the only way to know which wear findBuyOrderSummary's line refers to,
+  // since that line itself doesn't repeat the wear name.
+  function findActiveWearFilter() {
+    const re = /^Exterior:\s*(Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)$/;
+    const candidates = document.querySelectorAll("a, div, span");
+    for (const el of candidates) {
+      if (el.children.length > 2) continue;
+      const text = textOf(el).replace(/\s+/g, " ").trim();
+      const m = text.match(re);
+      if (m) return m[1];
+    }
+    return null;
+  }
+
   // Wallet currency: Steam's classic pages expose g_rgWalletInfo globally;
   // the new React UI may or may not still set it -- unverified against a
   // live page, so this is a best-effort lookup with a currency-symbol
@@ -147,11 +195,17 @@ function scrapeListingPage() {
   const currency = walletCurrency ? walletCurrency.currency : symbolGuess;
   const currencySource = walletCurrency ? walletCurrency.source : "symbol_guess";
 
+  const activeWear = findActiveWearFilter();
+  const buyOrder = findBuyOrderSummary(currency);
+  const buyOrderSummary =
+    activeWear && buyOrder ? { wear_name: activeWear, price: buyOrder.price, num_orders: buyOrder.num_orders } : null;
+
   return {
     market_hash_name: representativeName,
     currency,
     currency_source: currencySource,
     offers,
+    buy_order_summary: buyOrderSummary,
   };
 }
 
@@ -161,8 +215,72 @@ function setStatus(text, cls) {
   el.className = cls || "";
 }
 
+function fmtMoney(value) {
+  if (value === null || value === undefined) return "—"; // em dash
+  const sign = value < 0 ? "-" : "";
+  return `${sign}$${Math.abs(value).toFixed(2)}`;
+}
+
+function makeHeaderCell(text) {
+  const th = document.createElement("th");
+  th.textContent = text;
+  return th;
+}
+
+function makeSkinHeaderCell(header) {
+  const th = document.createElement("th");
+  const a = document.createElement("a");
+  a.href = header.steam_url;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.textContent = header.skin_name;
+  th.appendChild(a);
+  return th;
+}
+
+function makePriceCell(cell) {
+  const td = document.createElement("td");
+  td.textContent = fmtMoney(cell.value);
+  if (cell.color) td.classList.add("c-" + cell.color);
+  return td;
+}
+
+function renderTable(table) {
+  const wrap = document.getElementById("table-wrap");
+  wrap.textContent = "";
+  if (!table) return;
+
+  const el = document.createElement("table");
+
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  headRow.appendChild(makeHeaderCell("Wear"));
+  headRow.appendChild(makeSkinHeaderCell(table.input_header));
+  for (const header of table.outcome_headers) headRow.appendChild(makeSkinHeaderCell(header));
+  headRow.appendChild(makeHeaderCell("EV"));
+  thead.appendChild(headRow);
+  el.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const row of table.rows) {
+    const tr = document.createElement("tr");
+    const wearTd = document.createElement("td");
+    wearTd.textContent = row.wear_name;
+    tr.appendChild(wearTd);
+    tr.appendChild(makePriceCell(row.input_cell));
+    for (const cell of row.outcome_cells) tr.appendChild(makePriceCell(cell));
+    const evTd = makePriceCell(row.ev_cell);
+    evTd.classList.add("ev-cell");
+    tr.appendChild(evTd);
+    tbody.appendChild(tr);
+  }
+  el.appendChild(tbody);
+  wrap.appendChild(el);
+}
+
 async function onFetchClick() {
   setStatus("Working...");
+  document.getElementById("table-wrap").textContent = "";
 
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.url || !LISTING_URL_PATTERN.test(tab.url)) {
@@ -202,11 +320,16 @@ async function onFetchClick() {
     return;
   }
 
-  if (reply.ok) {
-    setStatus(`Saved ${reply.written} offer(s) for ${reply.skin_name}.`, "ok");
-  } else {
+  if (!reply.ok) {
     setStatus(reply.error, "err");
+    return;
   }
+
+  let statusText = `Saved ${reply.written} offer(s) for ${reply.skin_name}.`;
+  if (reply.buy_order_written) statusText += " Buy order summary saved.";
+  if (reply.table_error) statusText += "\n" + reply.table_error;
+  setStatus(statusText, "ok");
+  renderTable(reply.table);
 }
 
 document.getElementById("fetch-btn").addEventListener("click", onFetchClick);

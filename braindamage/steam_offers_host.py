@@ -25,7 +25,7 @@ from typing import Any, BinaryIO
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import config, signals
+from . import config, mono_trade_table, signals
 from .db import SessionLocal, upgrade_database
 from .market_names import parse_market_hash_name
 from .models import Skin
@@ -48,7 +48,9 @@ def handle_message(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
     Expected payload shape:
         {"market_hash_name": str, "currency": str,
          "offers": [{"wear_name": str | None, "float_value": float,
-                     "pattern_seed": int | None, "price": float}, ...]}
+                     "pattern_seed": int | None, "price": float}, ...],
+         "buy_order_summary": {"wear_name": str, "price": float,
+                                "num_orders": int} | None}
 
     market_hash_name only needs to be ONE representative "<name> (<wear>)"
     string (used to resolve the Skin) -- a single Steam Market page can list
@@ -56,6 +58,16 @@ def handle_message(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
     than one wear. Each offer's own "wear_name" (if present) is used for
     that offer's SteamOfferSignal; market_hash_name's parsed wear is only a
     fallback for offers that didn't carry one.
+
+    buy_order_summary is optional (Steam only renders that line once a wear
+    filter is active on the page -- see webext/popup.js) and shares the top-
+    level `currency`, since it's scraped off the same page as everything
+    else here. When present it's written as a BuyOrderSummarySignal.
+
+    On success, the reply also carries the popup's mono-trade price table
+    for the resolved skin (see braindamage.mono_trade_table) -- "table" is
+    None with "table_error" explaining why if the skin isn't a usable
+    trade-up input, e.g. a Covert (no next rarity) or an orphaned collection.
     """
     try:
         market_hash_name = payload["market_hash_name"]
@@ -123,7 +135,50 @@ def handle_message(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
         )
     signals.append_steam_offers(skin.id, entries)
 
-    return {"ok": True, "skin_name": skin.name, "written": len(entries)}
+    buy_order_written = False
+    buy_order_summary = payload.get("buy_order_summary")
+    if buy_order_summary:
+        bo_wear = buy_order_summary.get("wear_name")
+        bo_price = buy_order_summary.get("price")
+        bo_num_orders = buy_order_summary.get("num_orders")
+        if bo_wear and bo_price is not None and bo_num_orders is not None:
+            if currency == "EUR":
+                usd_bo_price = bo_price * config.EUR_USD_RATE
+                bo_raw = {"original_currency": "EUR", "original_price": bo_price, "eur_usd_rate": config.EUR_USD_RATE}
+            else:
+                usd_bo_price = bo_price
+                bo_raw = {}
+            signals.append_buy_order_summaries(
+                skin.id,
+                [
+                    signals.BuyOrderSummarySignal(
+                        market_hash_name=market_hash_name,
+                        wear_name=bo_wear,
+                        price=usd_bo_price,
+                        currency="USD",
+                        num_orders=bo_num_orders,
+                        fetched_at=signals.now_utc(),
+                        raw=bo_raw,
+                    )
+                ],
+            )
+            buy_order_written = True
+
+    table = None
+    table_error = None
+    try:
+        table = mono_trade_table.build_table(session, skin)
+    except mono_trade_table.MonoTradeTableError as exc:
+        table_error = str(exc)
+
+    return {
+        "ok": True,
+        "skin_name": skin.name,
+        "written": len(entries),
+        "buy_order_written": buy_order_written,
+        "table": table,
+        "table_error": table_error,
+    }
 
 
 # --- Native messaging stdio framing ---------------------------------------------

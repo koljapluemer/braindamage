@@ -103,6 +103,26 @@ class SteamOfferSignal(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class BuyOrderSummarySignal(BaseModel):
+    """One point-in-time summary of a skin's buy-order book at a specific
+    wear, scraped from a Steam Community Market listing page's "N requests to
+    buy at $X or lower" line -- Steam only renders that line once a wear
+    filter is active on the page, so unlike SteamOfferSignal (one row per
+    individual sell listing) this is wear-scoped by construction. This is the
+    buy side of the order book (an instant, no-listing-needed sell price),
+    the opposite of SteamOfferSignal's sell-side listings. Append-only,
+    written by the steam_offers_host native-messaging host."""
+
+    source: str = "steam"
+    market_hash_name: str
+    wear_name: str
+    price: float
+    currency: str = "USD"
+    num_orders: int
+    fetched_at: datetime
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
 class SkinEvent(BaseModel):
     """Reserved for future non-price signals (Valve announcements, streamer
     callouts, etc.). The shape is intentionally minimal — no writer exists yet."""
@@ -118,12 +138,14 @@ _PRICE_OBSERVATIONS_FILE = "price_observations.json"
 _AGGREGATED_PRICES_FILE = "aggregated_prices.json"
 _MARKET_OFFERS_FILE = "market_offers.json"
 _STEAM_OFFERS_FILE = "steam_offers.json"
+_BUY_ORDER_SUMMARY_FILE = "buy_order_summary.json"
 _EVENTS_FILE = "events.json"
 
 _price_observations_adapter = TypeAdapter(list[PriceObservationSignal])
 _aggregated_prices_adapter = TypeAdapter(list[AggregatedPriceSignal])
 _market_offers_adapter = TypeAdapter(list[MarketOfferSignal])
 _steam_offers_adapter = TypeAdapter(list[SteamOfferSignal])
+_buy_order_summary_adapter = TypeAdapter(list[BuyOrderSummarySignal])
 _events_adapter = TypeAdapter(list[SkinEvent])
 
 
@@ -186,6 +208,18 @@ def append_steam_offers(skin_id: str, new_offers: list[SteamOfferSignal]) -> Non
     existing = read_steam_offers(skin_id)
     existing.extend(new_offers)
     _write(skin_id, _STEAM_OFFERS_FILE, _steam_offers_adapter, existing)
+
+
+def read_buy_order_summaries(skin_id: str) -> list[BuyOrderSummarySignal]:
+    return _read(skin_id, _BUY_ORDER_SUMMARY_FILE, _buy_order_summary_adapter)
+
+
+def append_buy_order_summaries(skin_id: str, new_summaries: list[BuyOrderSummarySignal]) -> None:
+    if not new_summaries:
+        return
+    existing = read_buy_order_summaries(skin_id)
+    existing.extend(new_summaries)
+    _write(skin_id, _BUY_ORDER_SUMMARY_FILE, _buy_order_summary_adapter, existing)
 
 
 def read_events(skin_id: str) -> list[SkinEvent]:
