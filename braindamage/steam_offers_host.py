@@ -23,7 +23,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, BinaryIO
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from . import config, mono_trade_overview, mono_trade_table, offer_combos, signals
@@ -341,6 +341,25 @@ def handle_construct_contract(session: Session, payload: dict[str, Any]) -> dict
     }
 
 
+def handle_random_skin(session: Session, _payload: dict[str, Any]) -> dict[str, Any]:
+    """Picks a uniformly random weapon skin from the local catalog DB, for
+    webext/sidebar.js's Random Fetch button. Deliberately never calls out to
+    Steam itself for this -- Random Fetch already drives Steam page loads on
+    its own; it must not also hit Steam's search API just to decide where to
+    go next.
+
+    `steam_url` reuses mono_trade_table._steam_listing_url -- a listing URL
+    needs a full "<name> (<wear>)" market_hash_name to resolve at all (Steam
+    404s on the bare skin name), and that page then lists every wear
+    condition of the weapon together regardless of which one is in the URL,
+    which is exactly what lets Random Fetch cycle wears on it via the
+    category_730_Exterior query param (see webext/sidebar.js)."""
+    skin = session.scalars(select(Skin).order_by(func.random()).limit(1)).first()
+    if skin is None:
+        return {"ok": False, "error": "No skins in the catalog"}
+    return {"ok": True, "skin_name": skin.name, "steam_url": mono_trade_table._steam_listing_url(skin)}
+
+
 def handle_overview_chunk(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
     """Build one independently measurable rarity/StatTrak overview batch."""
     rarity = payload.get("rarity_name")
@@ -362,6 +381,7 @@ _HANDLERS = {
     "construct_contract": handle_construct_contract,
     "overview": lambda session, _payload: mono_trade_overview.build_overview(session),
     "overview_chunk": handle_overview_chunk,
+    "random_skin": handle_random_skin,
 }
 
 

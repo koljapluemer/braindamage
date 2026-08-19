@@ -5,7 +5,7 @@
 
 const NATIVE_HOST = "braindamage_steam_offers";
 
-const RELAYED_MESSAGE_TYPES = ["fetchOffers", "constructContract", "fetchOverview"];
+const RELAYED_MESSAGE_TYPES = ["fetchOffers", "constructContract", "fetchOverview", "randomSkin"];
 
 browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.type === "openOverview") {

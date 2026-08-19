@@ -121,6 +121,31 @@
     return null;
   }
 
+  // The clickable wear-tier filter tabs/buttons Steam renders on a listing
+  // page (plain wear-name text, e.g. a bare "Battle-Scarred" -- distinct
+  // from findActiveWearFilter's "Exterior: Battle-Scarred" chip, which
+  // reflects whichever one is *currently* selected). A listing card's own
+  // name span never matches on its own -- it's always the full weapon name
+  // plus " (Battle-Scarred)", never a leaf element whose ENTIRE text is
+  // just the bare wear name -- so exact-text leaf matching is safe here the
+  // same way it is elsewhere in this file (see the header comment: text/
+  // DOM-structure matching instead of relying on Steam's hashed class
+  // names). Returns { "Factory New": Element, ... } for whichever of the 5
+  // it actually finds -- callers must check all 5 are present before
+  // relying on this to drive Random Fetch's wear cycling.
+  function findWearFilterButtons() {
+    const found = {};
+    const candidates = document.querySelectorAll("span, div, a, button");
+    for (const el of candidates) {
+      if (el.children.length > 0) continue;
+      const text = textOf(el);
+      if (WEAR_NAMES.includes(text) && !found[text]) {
+        found[text] = el;
+      }
+    }
+    return found;
+  }
+
   function findWalletCurrency() {
     try {
       if (window.g_rgWalletInfo && window.g_rgWalletInfo.wallet_currency_display) {
@@ -223,6 +248,81 @@
     return response.reply;
   }
 
+  // --- "Random Fetch": continuously walk random skins, triggering the
+  // standard offer fetch once per wear tier for each. Wear cycling is
+  // in-page clicks on Steam's own wear-filter tabs (findWearFilterButtons
+  // above) -- NOT a URL parameter and NOT a page load.
+  //
+  // Steam's listing page only ever shows one page's worth of listings
+  // (Steam's own page size, currently ~20), sorted cheapest-first --
+  // unfiltered, that's the ~20 cheapest offers across ALL wears mixed
+  // together. Clicking a wear tab doesn't just add a buy-order-summary line
+  // (see findBuyOrderSummary's own comment for that part) -- it replaces
+  // the visible listing cards with THAT wear's own cheapest ~20, which is
+  // mostly-to-entirely different data from the unfiltered view and from
+  // every other wear's tab. So all 5 tabs each need their own scrapePage()
+  // call to actually collect 5 non-redundant pages of offers, not one
+  // shared view re-read 5 times -- see runRandomFetchSkin below, which
+  // waits for the listing cards themselves (not just Steam's filter
+  // indicator) to confirm each tab's own data has actually loaded before
+  // scraping it. Clicking through the 5 tabs on one already-loaded page
+  // still means 5x the *offer coverage* without 5x the Steam *traffic* a
+  // real navigation per wear would cost.
+  //
+  // A new *skin* genuinely needs a page load (Steam's market isn't a
+  // same-page SPA between different market_hash_names), so only that step
+  // needs state to survive the reload -- persisted to browser.storage.local
+  // under "bdRandomFetch" and picked up again by the freshly-injected
+  // content script on the next page. --------------------------------------
+
+  const RANDOM_FETCH_STORAGE_KEY = "bdRandomFetch";
+  const RANDOM_FETCH_IDLE = { active: false, skinName: null, baseUrl: null };
+  // Randomized pause before every Steam page load Random Fetch triggers
+  // (never a fixed cadence) -- an automated loop that hits Steam back-to-back
+  // as fast as pages render looks like a bot and risks rate-limiting/account
+  // scrutiny; this is deliberately not tunable from the UI.
+  const RANDOM_FETCH_MIN_DELAY_MS = 3000;
+  const RANDOM_FETCH_MAX_DELAY_MS = 9000;
+
+  function randomDelayMs() {
+    return RANDOM_FETCH_MIN_DELAY_MS + Math.random() * (RANDOM_FETCH_MAX_DELAY_MS - RANDOM_FETCH_MIN_DELAY_MS);
+  }
+
+  // Picks a random skin from the local catalog DB via the native host, NOT
+  // from Steam itself -- Random Fetch already hammers Steam with page
+  // loads; it must not also hit Steam's own search API just to decide
+  // where to go next. `baseUrl` is a *working* Steam listing URL for the
+  // skin (braindamage.steam_offers_host reuses the same
+  // mono_trade_table._steam_listing_url this app already uses for every
+  // other Steam link it shows) -- Steam 404s on a bare skin name with no
+  // wear suffix at all, so this must not be reconstructed from the name
+  // here. No wear is ever layered onto this URL -- see the block comment
+  // above for why wear cycling doesn't touch the URL at all any more.
+  async function pickRandomSkin() {
+    const response = await browser.runtime.sendMessage({
+      type: "randomSkin",
+      payload: { action: "random_skin" },
+    });
+    if (!response.ok) throw new Error(response.error);
+    if (!response.reply.ok) throw new Error(response.reply.error);
+    const skinName = response.reply.skin_name;
+    const baseUrl = response.reply.steam_url;
+    // Hard requirement, not an assumption: this app has previously navigated
+    // to a literal "https://.../undefined?..." URL because sidebar.js and
+    // the native host's reply shape drifted out of sync (Firefox doesn't
+    // hot-reload content scripts, so an old sidebar.js kept running against
+    // a newer host reply and silently read a field that no longer existed).
+    // Never again -- any reply that isn't exactly the two strings we need
+    // is treated as a hard failure, not "undefined" quietly flowing into a
+    // URL that gets sent to Steam.
+    if (typeof skinName !== "string" || !skinName || typeof baseUrl !== "string" || !baseUrl) {
+      throw new Error(
+        "native host reply is missing skin_name/steam_url -- reload the extension, it's probably out of date"
+      );
+    }
+    return { skinName, baseUrl };
+  }
+
   // --- Tailwind setup --------------------------------------------------
   // Scope every generated utility rule under "#bd-sidebar" (with
   // !important) so it can never bleed onto Steam's own page, and disable
@@ -303,6 +403,15 @@
     setup() {
       const { ref, watch, onMounted, nextTick } = Vue;
 
+      // -- "Random Fetch" state, persisted across page loads (see the
+      // top-of-file comment for why) -------------------------------------
+      const randomFetch = ref(RANDOM_FETCH_IDLE);
+      // Which wear tab Random Fetch is currently clicked into, purely for
+      // the floating Stop button's label -- NOT persisted (unlike
+      // randomFetch above, it never needs to survive a reload: wear cycling
+      // never navigates, see the "Random Fetch" block comment).
+      const randomFetchWear = ref("");
+
       // -- collapsed/expanded, persisted across page loads --------------
       const sidebar = createMachine(
         "sidebar",
@@ -316,8 +425,22 @@
         sidebar.state.value = stored.bdSidebarCollapsed ? "collapsed" : "expanded";
       });
       watch(sidebar.state, (value) => {
+        // While Random Fetch is running the sidebar is forced collapsed
+        // (see the watcher below) -- don't let that clobber the user's
+        // real preference, so it's restored as-is once they hit Stop.
+        if (randomFetch.value.active) return;
         browser.storage.local.set({ bdSidebarCollapsed: value === "collapsed" });
       });
+      // Force (and keep) the sidebar collapsed for as long as Random Fetch
+      // is active, regardless of the persisted preference above or of
+      // which page load this is.
+      watch(
+        randomFetch,
+        (value) => {
+          if (value.active) sidebar.state.value = "collapsed";
+        },
+        { deep: true }
+      );
 
       // -- main price table ------------------------------------------------
       const fetchFsm = createMachine(
@@ -395,6 +518,154 @@
         fetchFsm.send("start");
         fetchStatus.value = "Could not find any listings on this page yet -- try Refresh.";
         fetchFsm.send("fail");
+      }
+
+      // -- "Random Fetch": cycle every wear tab on the current skin's page
+      // (in-page clicks, no navigation), then move to a new random skin
+      // (a real page load) and repeat. See the top-of-file block comment
+      // for why wear cycling and skin cycling work so differently. --------
+
+      async function isRandomFetchStillActive() {
+        // Always re-read from storage rather than trusting the in-memory
+        // ref -- the only reliable way to notice Stop was clicked while an
+        // await (a click's settle-poll, runFetchAndRender, the pacing
+        // pause, ...) was in flight.
+        const stored = await browser.storage.local.get(RANDOM_FETCH_STORAGE_KEY);
+        const current = stored[RANDOM_FETCH_STORAGE_KEY];
+        return !!(current && current.active);
+      }
+
+      async function stopRandomFetch() {
+        randomFetch.value = RANDOM_FETCH_IDLE;
+        randomFetchWear.value = "";
+        await browser.storage.local.set({ [RANDOM_FETCH_STORAGE_KEY]: RANDOM_FETCH_IDLE });
+        // Random Fetch's forced-collapse watcher only ever drives the
+        // sidebar *into* "collapsed" -- restore whatever the user's real
+        // preference was, now that it's safe to persist again.
+        const stored = await browser.storage.local.get("bdSidebarCollapsed");
+        sidebar.state.value = stored.bdSidebarCollapsed ? "collapsed" : "expanded";
+      }
+
+      // Persists `picked` as the active skin and navigates to it -- the
+      // only place Random Fetch ever touches window.location.href, and the
+      // only place it ever needs the randomized inter-request pause (wear
+      // cycling on an already-loaded page doesn't touch Steam at all).
+      async function goToRandomFetchSkin(picked) {
+        const state = { active: true, skinName: picked.skinName, baseUrl: picked.baseUrl };
+        randomFetch.value = state;
+        randomFetchWear.value = "";
+        await browser.storage.local.set({ [RANDOM_FETCH_STORAGE_KEY]: state });
+
+        // Randomized pause before touching Steam again (see
+        // RANDOM_FETCH_MIN/MAX_DELAY_MS) -- re-check storage afterwards in
+        // case Stop was clicked during the wait, so a click during the
+        // pause actually prevents the next page load instead of only
+        // taking effect after it.
+        fetchStatus.value = "Random Fetch: pausing before the next page...";
+        await sleep(randomDelayMs());
+        if (!(await isRandomFetchStillActive())) return;
+
+        // Last line of defense: never call window.location.href (i.e.
+        // never send Steam a request) without a URL that's actually been
+        // validated. picked.baseUrl already went through pickRandomSkin's
+        // validation, but checking again here -- right at the point that
+        // actually contacts Steam -- means a future refactor that moves a
+        // bad URL past that first check still can't slip through.
+        if (typeof state.baseUrl !== "string" || !state.baseUrl) {
+          fetchStatus.value = "Random Fetch: refusing to navigate (no valid Steam URL), stopping.";
+          await stopRandomFetch();
+          return;
+        }
+        window.location.href = state.baseUrl;
+      }
+
+      async function startRandomFetch() {
+        fetchStatus.value = "Random Fetch: picking a random skin...";
+        let picked;
+        try {
+          picked = await pickRandomSkin();
+        } catch (e) {
+          fetchStatus.value = "Random Fetch: could not pick a skin (" + e.message + ").";
+          return;
+        }
+        await goToRandomFetchSkin(picked);
+      }
+
+      // Called once this page's skin has been through every wear tab --
+      // picks a fresh random skin and navigates to it. Keeps going even if
+      // the fetch for some individual wear tab failed or found nothing
+      // (see runRandomFetchSkin below); a single bad skin shouldn't stall
+      // the loop, only a broken skin *picker* should (handled below by
+      // stopping outright).
+      async function advanceRandomFetchSkin() {
+        if (!(await isRandomFetchStillActive())) return;
+        let picked;
+        try {
+          picked = await pickRandomSkin();
+        } catch (e) {
+          fetchStatus.value = "Random Fetch: could not pick the next skin (" + e.message + "), stopping.";
+          await stopRandomFetch();
+          return;
+        }
+        await goToRandomFetchSkin(picked);
+      }
+
+      // Drives the current page: waits for Steam's wear-filter tabs to
+      // render, then for each of the 5 wears in turn -- click its tab, wait
+      // for the listing cards themselves (not just Steam's "Exterior:
+      // <wear>" indicator) to confirm that wear's own page of offers has
+      // actually loaded, then run the standard offer fetch. No navigation
+      // anywhere in this function -- see the "Random Fetch" block comment
+      // up top for why wear cycling never leaves the page.
+      async function runRandomFetchSkin() {
+        fetchStatus.value = "Random Fetch: waiting for the wear filter tabs to render...";
+        let buttons = {};
+        for (let attempt = 0; attempt < 12; attempt++) {
+          buttons = findWearFilterButtons();
+          if (WEAR_NAMES.every((w) => buttons[w])) break;
+          await sleep(1000);
+        }
+
+        if (!WEAR_NAMES.every((w) => buttons[w])) {
+          // Not every skin necessarily renders wear tabs the same way --
+          // don't stall the whole loop over one page; just take whatever's
+          // on screen once, same as the always-on fetch does, and move on.
+          fetchStatus.value = "Random Fetch: no wear filter tabs found on this page -- fetching as-is.";
+          await runFetchAndRender(scrapePage());
+          await advanceRandomFetchSkin();
+          return;
+        }
+
+        for (const wearName of WEAR_NAMES) {
+          if (!(await isRandomFetchStillActive())) return;
+
+          randomFetchWear.value = wearName;
+          fetchStatus.value = `Random Fetch: switching to ${wearName}...`;
+          buttons[wearName].click();
+
+          // Confirm the *listing cards* actually refreshed to this wear's
+          // own set, not just that Steam's "Exterior: <wear>" chip updated
+          // -- the chip can flip before the AJAX-loaded card list catches
+          // up, and scraping in that gap would silently re-submit the
+          // PREVIOUS wear's page of offers as if they were this wear's,
+          // defeating the entire point of clicking the tab (see the
+          // "Random Fetch" block comment up top for why each tab's page of
+          // offers is genuinely new data, not a redundant view of the
+          // same ~20 listings). Confirmed once at least one scraped
+          // offer's own parsed wear_name (independent of anything Steam's
+          // chip says) matches the tab just clicked.
+          let scraped = scrapePage();
+          for (let attempt = 0; attempt < 12; attempt++) {
+            if (findActiveWearFilter() === wearName && scraped.offers.some((o) => o.wear_name === wearName)) break;
+            await sleep(500);
+            scraped = scrapePage();
+          }
+
+          if (!(await isRandomFetchStillActive())) return;
+          await runFetchAndRender(scraped);
+        }
+
+        await advanceRandomFetchSkin();
       }
 
       // -- "Construct Contract" widget: the single best mono trade-up combo
@@ -484,12 +755,25 @@
         }
       }
 
-      onMounted(autoInit);
+      onMounted(async () => {
+        const stored = await browser.storage.local.get(RANDOM_FETCH_STORAGE_KEY);
+        const state = stored[RANDOM_FETCH_STORAGE_KEY];
+        if (state && state.active) {
+          randomFetch.value = state;
+          await runRandomFetchSkin();
+        } else {
+          await autoInit();
+        }
+      });
 
       return {
         sidebar,
         openOverview: () => browser.runtime.sendMessage({ type: "openOverview" }),
         toggleSidebar: () => sidebar.send("toggle"),
+        randomFetch,
+        randomFetchWear,
+        startRandomFetch,
+        stopRandomFetch,
         fetchFsm,
         fetchStatus,
         table,

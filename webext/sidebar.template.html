@@ -40,6 +40,10 @@
                   title="Run the buy combo search on just what's visible on this page right now">
             Construct Contract
           </button>
+          <button type="button" :class="btnClass" @click="startRandomFetch"
+                  title="Continuously cycle random skins through every wear level, fetching offers for each">
+            Random Fetch
+          </button>
           <button type="button" :class="btnClass" title="Collapse" @click="toggleSidebar">&raquo;</button>
         </div>
 
@@ -174,4 +178,12 @@
             {{ fmtDate(entry.generated_at) }}: Generated contract with EV {{ fmtMoney(entry.expected_value) }} for float {{ entry.raw_avg_float.toFixed(4) }}
           </div>
         </div>
+      </div>
+
+      <div v-if="randomFetch.active" class="fixed top-2.5 left-2.5 z-[2147483000]">
+        <button type="button"
+                class="bg-[#8b2f2f] text-white border border-white/25 rounded-sm px-3 py-1.5 text-[12px] cursor-pointer hover:bg-[#a83a3a] shadow-[0_2px_8px_rgba(0,0,0,0.5)]"
+                @click="stopRandomFetch">
+          Stop Random Fetch ({{ randomFetch.skinName }}{{ randomFetchWear ? ' — ' + randomFetchWear : '' }})
+        </button>
       </div>
