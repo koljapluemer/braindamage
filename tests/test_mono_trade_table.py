@@ -263,6 +263,99 @@ class TestBuildTableRows:
         assert [h["skin_name"] for h in table["outcome_headers"]] == ["Output ST"]
 
 
+class TestBuildFloatDiagramData:
+    def test_raises_same_as_build_table_for_an_unusable_input(self, session):
+        skin = _make_skin(session, id="c", name="AWP | Dragon Lore", rarity_name="Covert")
+        with pytest.raises(mono_trade_table.MonoTradeTableError, match="no next rarity"):
+            mono_trade_table.build_float_diagram_data(session, skin)
+
+    def test_shapes_input_and_outcome_skin_float_bounds(self, session):
+        skin = _make_skin(
+            session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade", min_float=0.0, max_float=0.5
+        )
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted", min_float=0.1, max_float=0.9)
+
+        data = mono_trade_table.build_float_diagram_data(session, skin)
+
+        assert data["input_skin"] == {"skin_id": "in-a", "min_float": 0.0, "max_float": 0.5}
+        assert len(data["outcomes"]) == 1
+        outcome = data["outcomes"][0]
+        assert outcome["skin_id"] == "out-a"
+        assert outcome["min_float"] == 0.1
+        assert outcome["max_float"] == 0.9
+        assert outcome["probability"] == pytest.approx(1.0)
+
+    def test_outcome_net_price_by_wear_matches_latest_price_net_of_fees(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        signals.append_price_observations(
+            "out-a",
+            [signals.PriceObservationSignal(source="test", wear_name="Field-Tested", price=50.0, fetched_at=now_utc())],
+        )
+
+        data = mono_trade_table.build_float_diagram_data(session, skin)
+
+        assert data["outcomes"][0]["net_price_by_wear"] == {"Field-Tested": steam_fees.net_proceeds(50.0)}
+
+    def test_offer_points_are_grouped_into_batches_ranked_newest_first(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        older = now_utc() - timedelta(days=1)
+        newer = now_utc()
+        _offers("in-a", "Field-Tested", [10.0], fetched_at=older)
+        _offers("in-a", "Field-Tested", [20.0], fetched_at=newer)
+
+        data = mono_trade_table.build_float_diagram_data(session, skin)
+
+        by_price = {p["price"]: p["batch_rank"] for p in data["offer_points"]}
+        assert by_price == {10.0: 1, 20.0: 0}
+
+    def test_offer_points_exclude_offers_without_a_float(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        signals.append_steam_offers(
+            "in-a",
+            [
+                signals.SteamOfferSignal(
+                    market_hash_name="Input A (Field-Tested)",
+                    wear_name="Field-Tested",
+                    float_value=None,
+                    price=5.0,
+                    fetched_at=now_utc(),
+                )
+            ],
+        )
+
+        data = mono_trade_table.build_float_diagram_data(session, skin)
+
+        assert data["offer_points"] == []
+
+    def test_offer_points_are_colored_by_age_purple_green_red(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        _offers("in-a", "Field-Tested", [10.0], fetched_at=now_utc())
+        _offers("in-a", "Field-Tested", [20.0], fetched_at=now_utc() - timedelta(hours=12))
+        _offers("in-a", "Field-Tested", [30.0], fetched_at=now_utc() - timedelta(days=30))
+
+        data = mono_trade_table.build_float_diagram_data(session, skin)
+
+        color_by_price = {p["price"]: p["color"] for p in data["offer_points"]}
+        assert color_by_price == {10.0: "purple", 20.0: "green", 30.0: "red"}
+
+    def test_offer_points_only_keep_the_most_recent_max_batches(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        base = now_utc() - timedelta(days=30)
+        for i in range(mono_trade_table.FLOAT_DIAGRAM_MAX_BATCHES + 5):
+            _offers("in-a", "Field-Tested", [float(i)], fetched_at=base + timedelta(hours=i))
+
+        data = mono_trade_table.build_float_diagram_data(session, skin)
+
+        assert len(data["offer_points"]) == mono_trade_table.FLOAT_DIAGRAM_MAX_BATCHES
+        ranks = sorted(p["batch_rank"] for p in data["offer_points"])
+        assert ranks == list(range(mono_trade_table.FLOAT_DIAGRAM_MAX_BATCHES))
+
+
 class TestSteamListingUrl:
     def test_urls_are_valid_steam_listing_links(self, session):
         skin = _make_skin(session, id="in-a", name="AK-47 | Redline", rarity_name="Mil-Spec Grade")

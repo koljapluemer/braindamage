@@ -146,6 +146,17 @@
     return found;
   }
 
+  // Steam's own empty-state message for a wear filter with zero current
+  // listings -- a leaf element whose exact text is "No Listings Found",
+  // same exact-text-leaf matching as findWearFilterButtons above.
+  function findNoListingsMessage() {
+    const candidates = document.querySelectorAll("div, span, p");
+    for (const el of candidates) {
+      if (el.children.length === 0 && textOf(el) === "No Listings Found") return el;
+    }
+    return null;
+  }
+
   function findWalletCurrency() {
     try {
       if (window.g_rgWalletInfo && window.g_rgWalletInfo.wallet_currency_display) {
@@ -229,6 +240,50 @@
       offers,
       buy_order_summary: buyOrderSummary,
     };
+  }
+
+  // Resolves as soon as `wearName`'s own listings have actually rendered
+  // after a filter click -- either real offer cards for that wear, or
+  // Steam's own "No Listings Found" empty state, whichever the page
+  // produces. Driven by a MutationObserver reacting to the real DOM
+  // change, not a guessed delay: a fixed sleep before scraping can't tell
+  // "still loading" from "done", which is exactly why the previous version
+  // of this sometimes captured stale cards and sometimes didn't. Resolves
+  // to the settled scrape, or null if neither ever shows up within
+  // `timeoutMs` (a dead page shouldn't hang Random Fetch forever).
+  //
+  // Requires the "Exterior: <wear>" chip (findActiveWearFilter) to also
+  // already be showing `wearName`, not just offers/no-listings on their
+  // own -- two back-to-back empty wears would otherwise leave "No Listings
+  // Found" sitting on screen completely unchanged across the click, which
+  // is a real DOM state but a STALE one held over from the previous wear,
+  // not proof this wear's own (also-empty) result has loaded yet. The chip
+  // text is guaranteed to actually change even when the listings area
+  // doesn't, so requiring both together closes that gap.
+  function waitForListingsSettled(wearName, timeoutMs = 8000) {
+    const settled = () => {
+      if (findActiveWearFilter() !== wearName) return null;
+      const scraped = scrapePage();
+      return scraped.offers.some((o) => o.wear_name === wearName) || findNoListingsMessage() ? scraped : null;
+    };
+
+    const already = settled();
+    if (already) return Promise.resolve(already);
+
+    return new Promise((resolve) => {
+      const observer = new MutationObserver(() => {
+        const result = settled();
+        if (!result) return;
+        observer.disconnect();
+        clearTimeout(timer);
+        resolve(result);
+      });
+      const timer = setTimeout(() => {
+        observer.disconnect();
+        resolve(null);
+      }, timeoutMs);
+      observer.observe(document.body, { childList: true, subtree: true });
+    });
   }
 
   // --- Native host relay (via background.js -- see its own comment) ------
@@ -461,6 +516,21 @@
       // skin and the host returns this alongside its own reply.
       const contractHistory = ref([]);
 
+      // -- float diagrams: price-vs-float, input-float-vs-output-revenue,
+      // and EV-vs-float charts for the skin the page is currently showing
+      // (see webext/float_diagrams.js and mono_trade_table.build_float_diagram_data).
+      // floatDiagrams holds the raw reply; the canvases below are the DOM
+      // refs Chart.js draws into once floatDiagrams becomes non-null (see
+      // the watcher after onMounted). Chart.js instances themselves are
+      // deliberately NOT reactive state -- kept in `floatCharts` (plain
+      // closure variable, not a ref) so Vue never tries to proxy them.
+      const floatDiagrams = ref(null);
+      const bucketCanvas = ref(null);
+      const revenueCanvas = ref(null);
+      const evCanvas = ref(null);
+      const topRanges = ref([]);
+      let floatCharts = null;
+
       async function runFetchAndRender(scraped) {
         fetchFsm.send("start");
         if (!scraped.offers.length) {
@@ -497,6 +567,7 @@
         fetchStatus.value = statusText;
         table.value = reply.table;
         contractHistory.value = reply.contract_history || [];
+        floatDiagrams.value = reply.float_diagrams || null;
         fetchFsm.send("succeed");
       }
 
@@ -610,19 +681,25 @@
         await goToRandomFetchSkin(picked);
       }
 
-      // Drives the current page: waits for Steam's wear-filter tabs to
-      // render, then for each of the 5 wears in turn -- click its tab, wait
-      // for the listing cards themselves (not just Steam's "Exterior:
-      // <wear>" indicator) to confirm that wear's own page of offers has
-      // actually loaded, then run the standard offer fetch. No navigation
-      // anywhere in this function -- see the "Random Fetch" block comment
-      // up top for why wear cycling never leaves the page.
+      // Drives the current page: waits for Steam's wear-filter tabs (and a
+      // first real listing) to render, then for each of the 5 wears in
+      // turn -- click its tab, wait for that wear's listings to actually
+      // settle (see waitForListingsSettled), then run the standard offer
+      // fetch. No navigation anywhere in this function -- see the "Random
+      // Fetch" block comment up top for why wear cycling never leaves the
+      // page.
       async function runRandomFetchSkin() {
-        fetchStatus.value = "Random Fetch: waiting for the wear filter tabs to render...";
+        // Wait for the wear filter tabs AND at least one real listing to be
+        // on screen -- not just the tabs -- before clicking anything. The
+        // first click landing on a page that's only partially finished
+        // loading (tabs rendered, but the rest of the SPA not yet
+        // interactive) is exactly what made the very first wear tab
+        // unreliable before this wait existed.
+        fetchStatus.value = "Random Fetch: waiting for the page to finish loading...";
         let buttons = {};
         for (let attempt = 0; attempt < 12; attempt++) {
           buttons = findWearFilterButtons();
-          if (WEAR_NAMES.every((w) => buttons[w])) break;
+          if (WEAR_NAMES.every((w) => buttons[w]) && scrapePage().offers.length > 0) break;
           await sleep(1000);
         }
 
@@ -636,36 +713,50 @@
           return;
         }
 
+        // The very first filter click on a freshly-loaded page is
+        // unreliable even after the wait above (tabs + a first listing
+        // being on screen isn't the same as the page's filter-click
+        // handling actually being ready) -- one extra fixed pause here,
+        // on top of everything already waited for, specifically before
+        // that first click.
+        await sleep(3000);
+
         for (const wearName of WEAR_NAMES) {
           if (!(await isRandomFetchStillActive())) return;
-
-          randomFetchWear.value = wearName;
-          fetchStatus.value = `Random Fetch: switching to ${wearName}...`;
-          buttons[wearName].click();
-
-          // Confirm the *listing cards* actually refreshed to this wear's
-          // own set, not just that Steam's "Exterior: <wear>" chip updated
-          // -- the chip can flip before the AJAX-loaded card list catches
-          // up, and scraping in that gap would silently re-submit the
-          // PREVIOUS wear's page of offers as if they were this wear's,
-          // defeating the entire point of clicking the tab (see the
-          // "Random Fetch" block comment up top for why each tab's page of
-          // offers is genuinely new data, not a redundant view of the
-          // same ~20 listings). Confirmed once at least one scraped
-          // offer's own parsed wear_name (independent of anything Steam's
-          // chip says) matches the tab just clicked.
-          let scraped = scrapePage();
-          for (let attempt = 0; attempt < 12; attempt++) {
-            if (findActiveWearFilter() === wearName && scraped.offers.some((o) => o.wear_name === wearName)) break;
-            await sleep(500);
-            scraped = scrapePage();
-          }
-
-          if (!(await isRandomFetchStillActive())) return;
-          await runFetchAndRender(scraped);
+          await attemptWearFetch(wearName, buttons);
         }
 
         await advanceRandomFetchSkin();
+      }
+
+      // Clicks one wear tab and waits for its listings to actually settle
+      // (waitForListingsSettled: real offer cards for this wear, or
+      // Steam's "No Listings Found" -- either is a definitive, awaited
+      // signal, never a guessed delay), retrying the click once if
+      // settling times out, then runs the standard offer fetch.
+      async function attemptWearFetch(wearName, buttons) {
+        randomFetchWear.value = wearName;
+        fetchStatus.value = `Random Fetch: switching to ${wearName}...`;
+        buttons[wearName].click();
+
+        let scraped = await waitForListingsSettled(wearName);
+        if (!scraped) {
+          fetchStatus.value = `Random Fetch: ${wearName} didn't settle -- retrying the click...`;
+          buttons[wearName].click();
+          scraped = await waitForListingsSettled(wearName);
+        }
+
+        if (!(await isRandomFetchStillActive())) return;
+
+        if (!scraped) {
+          // Genuine failure to settle, not a zero-listings case -- a
+          // skin's "No Listings Found" IS a settled result, handled above
+          // -- so skip just this one wear rather than stalling the skin.
+          fetchStatus.value = `Random Fetch: ${wearName} tab never settled -- skipping it.`;
+          return;
+        }
+
+        await runFetchAndRender(scraped);
       }
 
       // -- "Construct Contract" widget: the single best mono trade-up combo
@@ -755,6 +846,30 @@
         }
       }
 
+      // Rebuilds the 3 float-diagram charts whenever floatDiagrams changes
+      // (a fresh scrape/refresh, or a new skin's page) -- always destroys
+      // whatever charts were drawn before, since v-if unmounts/remounts the
+      // canvases themselves whenever floatDiagrams flips to/from null (e.g.
+      // a skin that isn't a usable trade-up input), which would otherwise
+      // leave Chart.js holding a reference to a detached canvas.
+      watch(floatDiagrams, async (value) => {
+        if (floatCharts) {
+          floatCharts.destroy();
+          floatCharts = null;
+        }
+        if (!value) {
+          topRanges.value = [];
+          return;
+        }
+        await nextTick();
+        if (!bucketCanvas.value || !revenueCanvas.value || !evCanvas.value) return;
+        floatCharts = window.__bdFloatDiagrams.render(
+          { bucketCanvas: bucketCanvas.value, revenueCanvas: revenueCanvas.value, evCanvas: evCanvas.value },
+          value
+        );
+        topRanges.value = floatCharts.topRanges;
+      });
+
       onMounted(async () => {
         const stored = await browser.storage.local.get(RANDOM_FETCH_STORAGE_KEY);
         const state = stored[RANDOM_FETCH_STORAGE_KEY];
@@ -778,6 +893,11 @@
         fetchStatus,
         table,
         refresh: () => runFetchAndRender(scrapePage()),
+        floatDiagrams,
+        bucketCanvas,
+        revenueCanvas,
+        evCanvas,
+        topRanges,
         contractFsm,
         contractStatus,
         contract,

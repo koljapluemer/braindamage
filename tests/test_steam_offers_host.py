@@ -79,6 +79,7 @@ def _reply(skin_name: str, written: int, *, buy_order_written: bool = False) -> 
         "buy_order_written": buy_order_written,
         "table": None,
         "table_error": "Collection A has no eligible output at 'Restricted'.",
+        "float_diagrams": None,
         "contract_history": [],
     }
 

@@ -252,6 +252,10 @@ def handle_fetch_offers(session: Session, payload: dict[str, Any]) -> dict[str, 
     for the resolved skin (see braindamage.mono_trade_table) -- "table" is
     None with "table_error" explaining why if the skin isn't a usable
     trade-up input, e.g. a Covert (no next rarity) or an orphaned collection.
+    "float_diagrams" carries the sidebar's float-vs-price/revenue/EV chart
+    data (braindamage.mono_trade_table.build_float_diagram_data) -- None
+    under the same condition as "table" (they share the same validity
+    check), no separate error message since table_error already covers it.
     """
     prepared = _validate_and_prepare(session, payload)
     if isinstance(prepared, dict):
@@ -263,8 +267,10 @@ def handle_fetch_offers(session: Session, payload: dict[str, Any]) -> dict[str, 
 
     table = None
     table_error = None
+    float_diagrams = None
     try:
         table = mono_trade_table.build_table(session, skin)
+        float_diagrams = mono_trade_table.build_float_diagram_data(session, skin)
     except mono_trade_table.MonoTradeTableError as exc:
         table_error = str(exc)
 
@@ -275,6 +281,7 @@ def handle_fetch_offers(session: Session, payload: dict[str, Any]) -> dict[str, 
         "buy_order_written": buy_order_written,
         "table": table,
         "table_error": table_error,
+        "float_diagrams": float_diagrams,
         "contract_history": _recent_contract_history(skin.id),
     }
 

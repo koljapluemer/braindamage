@@ -83,6 +83,21 @@
           </table>
         </div>
 
+        <div v-if="floatDiagrams" class="mt-2.5">
+          <div class="relative h-[130px]">
+            <canvas ref="bucketCanvas"></canvas>
+          </div>
+          <div class="relative h-[80px] mt-1.5">
+            <canvas ref="revenueCanvas"></canvas>
+          </div>
+          <div class="relative h-[100px] mt-1.5">
+            <canvas ref="evCanvas"></canvas>
+          </div>
+          <ul class="mt-1 mb-0 pl-4 text-[11px] leading-tight">
+            <li v-for="(r, i) in topRanges" :key="i">{{ r.lo.toFixed(2) }}–{{ r.hi.toFixed(2) }}: EV {{ fmtMoney(r.ev) }}</li>
+          </ul>
+        </div>
+
         <div class="mt-2.5">
           <div v-if="contractFsm.is('idle', 'loading', 'error')" class="whitespace-pre-wrap text-[11px]"
                :class="{ 'text-[#ff6b6b]': contractFsm.is('error') }">

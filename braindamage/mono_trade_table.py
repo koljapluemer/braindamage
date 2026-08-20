@@ -60,13 +60,17 @@ def _steam_listing_url(skin: Skin) -> str:
     return STEAM_LISTING_BASE_URL + urllib.parse.quote(name, safe="")
 
 
-def _age_color(fetched_at: datetime) -> str:
+def _age_color(fetched_at: datetime, *, stale: str = "orange") -> str:
+    """purple = fresh, green = recent, `stale` (default "orange", matching
+    the sidebar table's cell coloring) otherwise -- `stale` is overridable
+    since not every consumer of this age scheme uses the same palette (e.g.
+    build_float_diagram_data's offer-point dots use "red" instead)."""
     age = now_utc() - fetched_at
     if age <= _FRESH_AGE:
         return "purple"
     if age <= _RECENT_AGE:
         return "green"
-    return "orange"
+    return stale
 
 
 def _listing_key(offer: signals.SteamOfferSignal) -> tuple[float | None, int | None, float]:
@@ -171,16 +175,13 @@ def _outcome_price_cell(
     return {"value": steam_fees.net_proceeds(price), "color": "grey", "source": "fallback"}
 
 
-def build_table(
-    session: Session,
-    skin: Skin,
-    *,
-    legacy_prices_by_skin: dict[str, dict[str, tuple[float, datetime]]] | None = None,
-) -> dict:
-    """The full sidebar table for `skin`: one row per wear tier, with `skin`'s
-    own buy-10-cost, every possible mono-trade outcome's price, and a
-    per-row EV. Raises MonoTradeTableError if `skin` isn't a valid trade-up
-    input at all, or its collection has no eligible output to trade into."""
+def _resolve_outcome_skins(session: Session, skin: Skin) -> list[Skin]:
+    """Validates `skin` as a mono trade-up input and returns its eligible
+    outcome skins at the next rarity tier (same collection, same
+    StatTrak state) -- shared by build_table and build_float_diagram_data,
+    which both need exactly this set. Raises MonoTradeTableError if `skin`
+    isn't usable as a trade-up input at all, or its collection has no
+    eligible output to trade into."""
     if skin.category_name in _NON_WEAPON_CATEGORIES or skin.souvenir or skin.collection_id is None:
         raise MonoTradeTableError(f"{skin.name} isn't a usable trade-up input.")
     target_rarity = next_rarity(skin.rarity_name) if skin.rarity_name else None
@@ -203,7 +204,20 @@ def build_table(
         raise MonoTradeTableError(
             f"{skin.collection_name} has no eligible output at {target_rarity!r}."
         )
+    return outcome_skins
 
+
+def build_table(
+    session: Session,
+    skin: Skin,
+    *,
+    legacy_prices_by_skin: dict[str, dict[str, tuple[float, datetime]]] | None = None,
+) -> dict:
+    """The full sidebar table for `skin`: one row per wear tier, with `skin`'s
+    own buy-10-cost, every possible mono-trade outcome's price, and a
+    per-row EV. Raises MonoTradeTableError if `skin` isn't a valid trade-up
+    input at all, or its collection has no eligible output to trade into."""
+    outcome_skins = _resolve_outcome_skins(session, skin)
     probability = 1.0 / len(outcome_skins)
 
     outcome_headers = [
@@ -251,4 +265,72 @@ def build_table(
         "input_header": {"skin_id": skin.id, "skin_name": skin.name, "steam_url": _steam_listing_url(skin)},
         "outcome_headers": outcome_headers,
         "rows": rows,
+    }
+
+
+# Fetch batches (offers sharing one fetched_at -- see steam_offers_host) contribute
+# to the float diagrams' bucketed price estimate below, most-recent-first, capped
+# at this many so a skin with a long fetch history doesn't drag in arbitrarily
+# stale data -- see build_float_diagram_data.
+FLOAT_DIAGRAM_MAX_BATCHES = 20
+
+
+def build_float_diagram_data(session: Session, skin: Skin) -> dict:
+    """Raw data for the sidebar's float-vs-price/revenue/EV diagrams
+    (webext/float_diagrams.js) -- every individual Steam offer observed for
+    `skin` across its FLOAT_DIAGRAM_MAX_BATCHES most recent fetch batches
+    (for the price-vs-float scatter/bucket chart), plus each relevant skin's
+    own float range and per-wear net outcome price (for the input-float ->
+    output-revenue curve). The bucketing/weighting/EV math itself lives
+    client-side (it's cheap, pure, and only needed for rendering) -- this
+    just gathers exactly what that math needs, in one shape. Raises
+    MonoTradeTableError under the same conditions as build_table (they share
+    _resolve_outcome_skins), since a skin that isn't a usable trade-up input
+    has no revenue/EV curve to plot either.
+    """
+    outcome_skins = _resolve_outcome_skins(session, skin)
+    probability = 1.0 / len(outcome_skins)
+
+    offers = [o for o in signals.read_steam_offers(skin.id) if o.float_value is not None]
+    batch_times = sorted({o.fetched_at for o in offers}, reverse=True)[:FLOAT_DIAGRAM_MAX_BATCHES]
+    batch_rank = {fetched_at: rank for rank, fetched_at in enumerate(batch_times)}  # 0 == most recent
+    offer_points = [
+        {
+            "float_value": o.float_value,
+            "price": o.price,
+            "batch_rank": batch_rank[o.fetched_at],
+            # Same purple/green/stale age scheme as the sidebar table's cells
+            # (_age_color), just with "red" for the stale tier instead of
+            # "orange" -- see build_float_diagram_data's scatter dots.
+            "color": _age_color(o.fetched_at, stale="red"),
+        }
+        for o in offers
+        if o.fetched_at in batch_rank
+    ]
+
+    def _outcome_entry(outcome: Skin) -> dict:
+        prices_by_wear = pricing.latest_prices_by_wear(outcome.id)
+        net_price_by_wear = {
+            wear_name: steam_fees.net_proceeds(prices_by_wear[wear_name][0])
+            for wear_name, _lo, _hi in WEAR_BUCKETS
+            if wear_name in prices_by_wear
+        }
+        return {
+            "skin_id": outcome.id,
+            "skin_name": outcome.name,
+            "min_float": outcome.min_float if outcome.min_float is not None else 0.0,
+            "max_float": outcome.max_float if outcome.max_float is not None else 1.0,
+            "probability": probability,
+            "net_price_by_wear": net_price_by_wear,
+        }
+
+    return {
+        "input_skin": {
+            "skin_id": skin.id,
+            "min_float": skin.min_float if skin.min_float is not None else 0.0,
+            "max_float": skin.max_float if skin.max_float is not None else 1.0,
+        },
+        "offer_points": offer_points,
+        "outcomes": [_outcome_entry(o) for o in outcome_skins],
+        "wear_buckets": [{"wear_name": name, "lo": lo, "hi": hi} for name, lo, hi in WEAR_BUCKETS],
     }

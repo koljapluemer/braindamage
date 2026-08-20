@@ -17,7 +17,14 @@
   "content_scripts": [
     {
       "matches": ["*://steamcommunity.com/market/listings/*"],
-      "js": ["vendor/vue.runtime.global.prod.js", "vendor/tailwind.js", "sidebar.render.generated.js", "sidebar.js"],
+      "js": [
+        "vendor/vue.runtime.global.prod.js",
+        "vendor/chart.umd.min.js",
+        "vendor/tailwind.js",
+        "sidebar.render.generated.js",
+        "float_diagrams.js",
+        "sidebar.js"
+      ],
       "css": ["sidebar.css"],
       "run_at": "document_idle"
     }
