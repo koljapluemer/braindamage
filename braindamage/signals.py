@@ -100,6 +100,13 @@ class SteamOfferSignal(BaseModel):
     price: float
     currency: str = "USD"
     fetched_at: datetime
+    # True for a batch written by the sidebar's "Auto-Scroll & Save" flow
+    # (webext/sidebar.js), which scrolls the listing page to load as many
+    # offers as Steam will render -- up to 1000 -- before saving, instead of
+    # whatever ~20-row window happened to be on screen. Lets downstream
+    # consumers tell a near-complete snapshot of a skin's listings apart from
+    # an ordinary single-page scrape. False for every other write path.
+    comprehensive: bool = False
     raw: dict[str, Any] = Field(default_factory=dict)
 
 

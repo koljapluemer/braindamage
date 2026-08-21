@@ -15,9 +15,10 @@ from typing import Protocol
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import pricing, steam_fees
+from . import pricing
 from .models import Skin
 from .tradeup import (
+    WEAR_BUCKETS,
     collection_probability,
     next_rarity,
     normalized_float,
@@ -106,10 +107,18 @@ def _output_specs(session: Session, skin: Skin) -> list[OutputSpec] | None:
     probability = collection_probability(REQUIRED_INPUTS, len(output_skins))
     specs = []
     for out_skin in output_skins:
-        net_by_wear = {
-            wear: steam_fees.net_proceeds(price)
-            for wear, (price, _observed_at) in pricing.latest_prices_by_wear(out_skin.id).items()
-        }
+        # Same pricing.net_sell_price_for_wear every other outcome-price
+        # consumer uses (the sidebar table, the float diagrams) -- a
+        # buy-order price wins when one's on disk, same as there. This used
+        # to call pricing.latest_prices_by_wear directly instead, which
+        # silently ignores buy orders entirely -- Construct Contract's
+        # outcome prices disagreeing with the table for the exact same
+        # skin+wear was that drift showing up.
+        net_by_wear = {}
+        for wear_name, _lo, _hi in WEAR_BUCKETS:
+            resolved = pricing.net_sell_price_for_wear(out_skin.id, wear_name)
+            if resolved is not None:
+                net_by_wear[wear_name] = resolved[0]
         specs.append(
             OutputSpec(
                 skin_id=out_skin.id,

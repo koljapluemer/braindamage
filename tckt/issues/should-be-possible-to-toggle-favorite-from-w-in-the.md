@@ -1,1 +1,0 @@
-should be possible to toggle favorite from w/in the Contract modal

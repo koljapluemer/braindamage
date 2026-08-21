@@ -18,14 +18,22 @@
   }
 
   try {
+    // The sidebar's market dropdown (webext/sidebar.js) persists its choice
+    // to browser.storage.local under "bdInputSource" -- this tab has no
+    // dropdown of its own, so it just reads whatever was last selected there
+    // (defaulting to "steam", same default the native host itself falls
+    // back to for an unrecognized/missing value).
+    const storedInputSource = await browser.storage.local.get("bdInputSource");
+    const inputSource = storedInputSource.bdInputSource === "csfloat" ? "csfloat" : "steam";
+
     const batches = rarities.flatMap((rarity_name) => [false, true].map((stattrak) => ({ rarity_name, stattrak })));
     const trades = [];
     for (let i = 0; i < batches.length; i++) {
       const batch = batches[i];
-      status.textContent = `Calculating ${batch.stattrak ? "StatTrak™ " : ""}${batch.rarity_name} trades — ${i}/${batches.length}`;
+      status.textContent = `Calculating ${batch.stattrak ? "StatTrak™ " : ""}${batch.rarity_name} trades (${inputSource}) — ${i}/${batches.length}`;
       const response = await browser.runtime.sendMessage({
         type: "fetchOverview",
-        payload: { action: "overview_chunk", ...batch },
+        payload: { action: "overview_chunk", input_source: inputSource, ...batch },
       });
       if (!response.ok) throw new Error(response.error);
       if (!response.reply.ok) throw new Error(response.reply.error);

@@ -98,6 +98,23 @@ class TestHandleMessage:
         assert written[0].price == 1.23
         assert written[0].wear_name == "Field-Tested"
 
+    def test_comprehensive_flag_is_stamped_onto_written_offers(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+
+        reply = steam_offers_host.handle_message(session, _payload(comprehensive=True))
+
+        assert reply == _reply("Input A", 1)
+        written = signals.read_steam_offers("in-a")
+        assert written[0].comprehensive is True
+
+    def test_comprehensive_flag_defaults_to_false(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+
+        steam_offers_host.handle_message(session, _payload())
+
+        written = signals.read_steam_offers("in-a")
+        assert written[0].comprehensive is False
+
     def test_per_offer_wear_name_overrides_market_hash_name_wear(self, session):
         # A single Steam Market page can list every wear condition of one
         # weapon together -- market_hash_name is only ONE representative
@@ -386,6 +403,293 @@ class TestHandleConstructContract:
 
         assert reply["ok"] is False
         assert "Unknown action" in reply["error"]
+
+
+def _csfloat_payload(**overrides) -> dict:
+    base = {
+        "action": "fetch_csfloat_offers",
+        "base_skin_name": "Input A",
+        "currency": "USD",
+        "offers": [
+            {
+                "wear_name": "Field-Tested",
+                "float_value": 0.2,
+                "pattern_seed": 7,
+                "price": 1.23,
+                "stattrak": False,
+                "souvenir": False,
+                "listing_id": "csfloat-1",
+                "listing_type": "buy_now",
+            }
+        ],
+    }
+    base.update(overrides)
+    return base
+
+
+class TestHandleFetchCsfloatOffers:
+    def test_valid_payload_writes_market_offers_and_acks(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+
+        reply = steam_offers_host.handle_message(session, _csfloat_payload())
+
+        assert reply["ok"] is True
+        assert reply["skin_name"] == "Input A"
+        assert reply["written"] == 1
+        assert reply["group_errors"] == []
+        written = signals.read_market_offers("in-a")
+        assert len(written) == 1
+        assert written[0].source == "csfloat"
+        assert written[0].listing_id == "csfloat-1"
+        assert written[0].float_value == 0.2
+        assert written[0].price == 1.23
+        assert written[0].wear_name == "Field-Tested"
+        assert written[0].listing_type == "buy_now"
+        assert written[0].raw["pattern_seed"] == 7
+
+    def test_offers_are_grouped_by_stattrak_souvenir_into_separate_skins(self, session):
+        _make_skin(session, id="normal", name="Input A", stattrak=False, souvenir=False)
+        _make_skin(session, id="st", name="Input A", stattrak=True, souvenir=False)
+
+        reply = steam_offers_host.handle_message(
+            session,
+            _csfloat_payload(
+                offers=[
+                    {
+                        "wear_name": "Field-Tested", "float_value": 0.2, "price": 1.0,
+                        "stattrak": False, "souvenir": False, "listing_id": "l1", "listing_type": "buy_now",
+                    },
+                    {
+                        "wear_name": "Field-Tested", "float_value": 0.3, "price": 5.0,
+                        "stattrak": True, "souvenir": False, "listing_id": "l2", "listing_type": "buy_now",
+                    },
+                    {
+                        "wear_name": "Field-Tested", "float_value": 0.31, "price": 6.0,
+                        "stattrak": True, "souvenir": False, "listing_id": "l3", "listing_type": "buy_now",
+                    },
+                ]
+            ),
+        )
+
+        assert reply["ok"] is True
+        assert reply["written"] == 3
+        # The StatTrak group has 2 offers vs. the normal group's 1, so it's
+        # the "primary" skin the returned table/skin_name reflect.
+        assert reply["skin_name"] == "Input A"
+        assert len(signals.read_market_offers("normal")) == 1
+        assert len(signals.read_market_offers("st")) == 2
+
+    def test_unresolvable_group_reports_error_but_other_groups_still_save(self, session):
+        _make_skin(session, id="normal", name="Input A", stattrak=False, souvenir=False)
+        # No StatTrak "Input A" skin exists in the catalog.
+
+        reply = steam_offers_host.handle_message(
+            session,
+            _csfloat_payload(
+                offers=[
+                    {
+                        "wear_name": "Field-Tested", "float_value": 0.2, "price": 1.0,
+                        "stattrak": False, "souvenir": False, "listing_id": "l1", "listing_type": "buy_now",
+                    },
+                    {
+                        "wear_name": "Field-Tested", "float_value": 0.3, "price": 5.0,
+                        "stattrak": True, "souvenir": False, "listing_id": "l2", "listing_type": "buy_now",
+                    },
+                ]
+            ),
+        )
+
+        assert reply["ok"] is True
+        assert reply["written"] == 1
+        assert len(reply["group_errors"]) == 1
+        assert "No matching skin" in reply["group_errors"][0]
+        assert len(signals.read_market_offers("normal")) == 1
+
+    def test_no_resolvable_groups_returns_error(self, session):
+        reply = steam_offers_host.handle_message(session, _csfloat_payload())
+
+        assert reply["ok"] is False
+        assert "No matching skin" in reply["error"]
+
+    def test_eur_payload_is_converted_to_usd(self, session, monkeypatch):
+        monkeypatch.setattr(steam_offers_host.config, "EUR_USD_RATE", 1.1)
+        _make_skin(session, id="in-a", name="Input A")
+
+        reply = steam_offers_host.handle_message(
+            session, _csfloat_payload(currency="EUR", offers=[
+                {
+                    "wear_name": "Field-Tested", "float_value": 0.2, "price": 1.0,
+                    "stattrak": False, "souvenir": False, "listing_id": "l1", "listing_type": "buy_now",
+                }
+            ])
+        )
+
+        assert reply["ok"] is True
+        written = signals.read_market_offers("in-a")
+        assert written[0].price == pytest.approx(1.1)
+        assert written[0].currency == "USD"
+        assert written[0].raw["original_currency"] == "EUR"
+
+    def test_reply_includes_table_priced_from_input_source(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+
+        reply = steam_offers_host.handle_message(
+            session, _csfloat_payload(input_source="csfloat", offers=[
+                {
+                    "wear_name": "Battle-Scarred", "float_value": 0.9, "price": p,
+                    "stattrak": False, "souvenir": False, "listing_id": f"l{i}", "listing_type": "buy_now",
+                }
+                for i, p in enumerate(range(1, 11))
+            ])
+        )
+
+        assert reply["ok"] is True
+        assert reply["table_error"] is None
+        row = next(r for r in reply["table"]["rows"] if r["wear_name"] == "Battle-Scarred")
+        assert row["input_cell"]["value"] == pytest.approx(sum(range(1, 11)))
+
+        # Same skin, but the "steam" dropdown selection sees nothing (no
+        # SteamOfferSignal was ever written by this handler).
+        reply_steam = steam_offers_host.handle_message(
+            session, _csfloat_payload(input_source="steam", offers=[
+                {
+                    "wear_name": "Battle-Scarred", "float_value": 0.9, "price": 1.0,
+                    "stattrak": False, "souvenir": False, "listing_id": "l99", "listing_type": "buy_now",
+                }
+            ])
+        )
+        row_steam = next(r for r in reply_steam["table"]["rows"] if r["wear_name"] == "Battle-Scarred")
+        assert row_steam["input_cell"] == {"value": None, "color": None}
+
+
+def _ten_csfloat_offers(start_price: float = 1.0, *, stattrak: bool = False, listing_type: str = "buy_now") -> list[dict]:
+    return [
+        {
+            "wear_name": "Field-Tested",
+            "float_value": 0.02 + i * 0.001,
+            "pattern_seed": i,
+            "price": start_price + i,
+            "stattrak": stattrak,
+            "souvenir": False,
+            "listing_id": f"csfloat-{stattrak}-{i}",
+            "listing_type": listing_type,
+        }
+        for i in range(10)
+    ]
+
+
+class TestHandleConstructContractCsfloat:
+    def test_builds_contract_from_payload_offers_only_and_still_writes_to_disk(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        signals.append_price_observations(
+            "out-a",
+            [signals.PriceObservationSignal(source="test", wear_name="Factory New", price=100.0, fetched_at=now_utc())],
+        )
+        # Stale disk data for the same skin that this handler must NOT draw
+        # from -- if it leaked in, the cheapest 10 would include this $0.01
+        # offer instead of matching _ten_csfloat_offers()'s real_cost exactly.
+        signals.append_market_offers(
+            "in-a",
+            [
+                signals.MarketOfferSignal(
+                    source="csfloat", listing_id="stale", market_hash_name="Input A (Field-Tested)",
+                    wear_name="Field-Tested", float_value=0.5, price=0.01, listing_type="buy_now",
+                    fetched_at=now_utc(),
+                )
+            ],
+        )
+
+        reply = steam_offers_host.handle_message(
+            session,
+            _csfloat_payload(action="construct_contract_csfloat", offers=_ten_csfloat_offers()),
+        )
+
+        assert reply["ok"] is True
+        assert reply["written"] == 10
+        contract = reply["contract"]
+        assert contract["skin_name"] == "Input A"
+        assert contract["real_cost"] == pytest.approx(sum(1.0 + i for i in range(10)))
+        assert len(contract["offers"]) == 10
+        # pattern_seed round-trips even though MarketOfferSignal has no such
+        # field -- it's recovered from `raw` (see _offer_pattern_seed).
+        assert sorted(o["pattern_seed"] for o in contract["offers"]) == list(range(10))
+        assert contract["outcomes"][0]["predicted_wear"] == "Factory New"
+
+        on_disk = signals.read_market_offers("in-a")
+        assert len(on_disk) == 11  # the 10 fresh + the pre-seeded stale one
+
+        history = signals.read_contract_history("in-a")
+        assert len(history) == 1
+        assert reply["contract_history"] == [
+            {
+                "generated_at": history[0].generated_at.isoformat(),
+                "expected_value": history[0].expected_value,
+                "raw_avg_float": history[0].raw_avg_float,
+            }
+        ]
+
+    def test_auction_listings_dont_count_toward_the_ten(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+
+        offers = _ten_csfloat_offers()
+        offers[0]["listing_type"] = "auction"
+        reply = steam_offers_host.handle_message(
+            session, _csfloat_payload(action="construct_contract_csfloat", offers=offers)
+        )
+
+        assert reply["ok"] is False
+        assert "Only 9 buy-now listing" in reply["error"]
+        # Still saved to disk, auction included -- just not usable as input cost.
+        assert len(signals.read_market_offers("in-a")) == 10
+
+    def test_best_combo_wins_across_stattrak_and_normal_groups(self, session):
+        _make_skin(session, id="normal", name="Input A", stattrak=False)
+        _make_skin(session, id="st", name="Input A", stattrak=True)
+        _make_skin(session, id="out-normal", name="Output Normal", rarity_name="Restricted", stattrak=False)
+        _make_skin(session, id="out-st", name="Output ST", rarity_name="Restricted", stattrak=True)
+        signals.append_price_observations(
+            "out-normal",
+            [signals.PriceObservationSignal(source="test", wear_name="Factory New", price=5.0, fetched_at=now_utc())],
+        )
+        signals.append_price_observations(
+            "out-st",
+            [signals.PriceObservationSignal(source="test", wear_name="Factory New", price=500.0, fetched_at=now_utc())],
+        )
+
+        reply = steam_offers_host.handle_message(
+            session,
+            _csfloat_payload(
+                action="construct_contract_csfloat",
+                offers=_ten_csfloat_offers(stattrak=False) + _ten_csfloat_offers(stattrak=True, start_price=1.0),
+            ),
+        )
+
+        assert reply["ok"] is True
+        # The StatTrak group's output is priced far higher -- its combo must
+        # be the one that wins the cross-group EV comparison.
+        assert reply["contract"]["stattrak"] is True
+        assert reply["skin_name"] == "Input A"
+
+    def test_fewer_than_ten_buy_now_listings_returns_error(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+
+        reply = steam_offers_host.handle_message(
+            session,
+            _csfloat_payload(action="construct_contract_csfloat", offers=_ten_csfloat_offers()[:9]),
+        )
+
+        assert reply["ok"] is False
+        assert "Only 9 buy-now listing" in reply["error"]
+
+    def test_no_resolvable_groups_returns_error(self, session):
+        reply = steam_offers_host.handle_message(
+            session, _csfloat_payload(action="construct_contract_csfloat")
+        )
+
+        assert reply["ok"] is False
+        assert "No matching skin" in reply["error"]
 
 
 class TestMessageFraming:

@@ -20,7 +20,17 @@
   window.__bdSidebarInjected = true;
 
   const CS2_LISTING_PATTERN = /^https:\/\/steamcommunity\.com\/market\/listings\/730\//;
-  if (!CS2_LISTING_PATTERN.test(window.location.href)) return;
+  // CSfloat is an Angular SPA -- csfloat.com/search?def_index=...&paint_index=...
+  // is the page that lists one weapon+paint's individual offers (see
+  // scrapeCsfloatPage below), but the user can reach it by client-side
+  // routing from csfloat.com's root without a full page (re)navigation, so
+  // this content script can't gate on a specific path the way the Steam
+  // pattern above does -- it mounts on any csfloat.com page and just finds
+  // nothing to scrape (a graceful "no listings" status, same as a slow-
+  // loading Steam page) until the user is actually on a listing page.
+  const IS_CSFLOAT_HOST =
+    window.location.hostname === "csfloat.com" || window.location.hostname.endsWith(".csfloat.com");
+  if (!CS2_LISTING_PATTERN.test(window.location.href) && !IS_CSFLOAT_HOST) return;
 
   // --- Page scraping (see webext/popup.js's original scrapeListingPage for
   // the full rationale behind text/DOM-structure matching instead of class
@@ -242,6 +252,128 @@
     };
   }
 
+  // Steam's own total-match count for the current listing page/filter (e.g.
+  // "Found 1.964 results") -- read by "Auto-Scroll & Save" below to know how
+  // many offers it's aiming to load before it can stop scrolling. The
+  // digit-group separator varies by locale the same way price parsing does
+  // elsewhere in this file (EUR pages use '.', USD pages use ',') but this
+  // only ever needs the integer count, so every non-digit character is just
+  // stripped rather than parsed as a real thousands separator. Returns null
+  // if the element isn't on the page (e.g. still loading).
+  function findResultsCount() {
+    const re = /Found\s+([\d.,]+)\s+results?/i;
+    const spans = document.querySelectorAll("span");
+    for (const span of spans) {
+      if (span.children.length > 0) continue;
+      const m = textOf(span).match(re);
+      if (!m) continue;
+      const n = parseInt(m[1].replace(/[.,]/g, ""), 10);
+      if (!Number.isNaN(n)) return n;
+    }
+    return null;
+  }
+
+  // --- CSfloat page scraping ---------------------------------------------
+  // Unlike Steam's hashed/obfuscated classes (see the header comment above
+  // for why that scraper matches on text/DOM structure instead), CSfloat's
+  // Angular app renders stable, literal class names -- "item-grid" per
+  // offer card, "item-name"/"subtext"/"price"/"wear-value"/"paint-seed"
+  // within it (see csfloat_item_card.html) -- so plain class selectors are
+  // safe and far simpler here.
+  //
+  // A CSfloat search page scoped to one weapon+paint (def_index/paint_index)
+  // can mix StatTrak/Souvenir/normal listings in the same results list
+  // (unlike Steam, where those are entirely separate market_hash_name pages)
+  // -- the item-name element's own text never carries that prefix, only its
+  // ".subtext" line does (e.g. "StatTrak™ Factory New"), so each offer's
+  // stattrak/souvenir flags are parsed per-card, not once for the page. The
+  // native host (steam_offers_host.handle_fetch_csfloat_offers) groups
+  // offers by (stattrak, souvenir) and resolves each group to its own
+  // catalog Skin.
+
+  function parseCsfloatSubtext(text) {
+    let stattrak = false;
+    let souvenir = false;
+    let rest = text;
+    if (rest.startsWith("StatTrak™")) {
+      stattrak = true;
+      rest = rest.slice("StatTrak™".length).trim();
+    } else if (rest.startsWith("Souvenir")) {
+      souvenir = true;
+      rest = rest.slice("Souvenir".length).trim();
+    }
+    return { stattrak, souvenir, wearName: WEAR_NAMES.includes(rest) ? rest : null };
+  }
+
+  // CSfloat renders "<amount> <symbol>" (symbol trailing, space-separated,
+  // "." decimal point regardless of currency -- confirmed against a live
+  // scrape, e.g. "19.95 €"), unlike Steam's leading, no-space "$0.12" --
+  // hence its own regex here rather than reusing extractPriceText above.
+  function extractCsfloatPrice(text) {
+    const symbolChar = Object.keys(SYMBOL_TO_CURRENCY).find((s) => text.includes(s));
+    const currency = symbolChar ? SYMBOL_TO_CURRENCY[symbolChar] : null;
+    const match = text.match(/([0-9]+(?:[.,][0-9]+)?)/);
+    const price = match ? parseFloat(match[1].replace(",", ".")) : null;
+    return { price, currency };
+  }
+
+  function scrapeCsfloatPage() {
+    const cards = document.querySelectorAll(".item-grid");
+    const offers = [];
+    let baseSkinName = null;
+    let currency = null;
+
+    for (const card of cards) {
+      const nameEl = card.querySelector(".item-name");
+      const subtextEl = card.querySelector(".subtext");
+      const priceEl = card.querySelector(".price-row .price");
+      if (!nameEl || !subtextEl || !priceEl) continue;
+
+      const { stattrak, souvenir, wearName } = parseCsfloatSubtext(textOf(subtextEl));
+      if (!wearName) continue;
+
+      const { price, currency: offerCurrency } = extractCsfloatPrice(textOf(priceEl));
+      if (price === null) continue;
+      if (!currency && offerCurrency) currency = offerCurrency;
+
+      const name = textOf(nameEl);
+      if (!baseSkinName) baseSkinName = name;
+
+      const wearValueEl = card.querySelector(".wear-value");
+      const floatValue = wearValueEl ? parseFloat(textOf(wearValueEl)) : NaN;
+      const paintSeedEl = card.querySelector(".paint-seed");
+      const patternSeed = paintSeedEl ? parseInt(textOf(paintSeedEl), 10) : NaN;
+
+      // CSfloat's own listing ID isn't rendered anywhere in the DOM -- the
+      // Steam inspect link's href encodes a per-physical-item nonce (the
+      // trailing hex blob after csgo_econ_action_preview), which is stable
+      // enough to serve as a dedup identity the same way (float_value,
+      // pattern_seed) does for Steam's own listing-ID-less pages (see
+      // mono_trade_table._offers_for_wear). Falls back to a synthetic key
+      // built from float/price/seed on the rare card with no inspect link
+      // at all, so listing_id (required by MarketOfferSignal) is never
+      // empty.
+      const inspectLink = card.querySelector('a[href^="steam://rungame/730/"]');
+      const listingId = inspectLink ? inspectLink.href : `synthetic:${floatValue}:${patternSeed}:${price}`;
+
+      const buttonTexts = Array.from(card.querySelectorAll("button")).map(textOf);
+      const listingType = buttonTexts.some((t) => /bid/i.test(t)) ? "auction" : "buy_now";
+
+      offers.push({
+        wear_name: wearName,
+        float_value: Number.isNaN(floatValue) ? null : floatValue,
+        pattern_seed: Number.isNaN(patternSeed) ? null : patternSeed,
+        price,
+        stattrak,
+        souvenir,
+        listing_id: listingId,
+        listing_type: listingType,
+      });
+    }
+
+    return { base_skin_name: baseSkinName, currency, offers };
+  }
+
   // Resolves as soon as `wearName`'s own listings have actually rendered
   // after a filter click -- either real offer cards for that wear, or
   // Steam's own "No Listings Found" empty state, whichever the page
@@ -286,6 +418,46 @@
     });
   }
 
+  // Scrolls the page itself to the bottom -- Steam's listing page is a
+  // normal window-scrolled infinite list (not an inner virtualized
+  // container), so this is all "Auto-Scroll & Save" below needs to trigger
+  // the next page of results loading.
+  function scrollListingsToBottom() {
+    window.scrollTo(0, document.body.scrollHeight);
+  }
+
+  // Resolves once a fresh scrapePage() reports more offers than
+  // `previousCount`, or null if that doesn't happen within timeoutMs --
+  // same MutationObserver-over-a-fixed-timeout shape as
+  // waitForListingsSettled above, and for the same reason: a guessed delay
+  // can't tell "still loading more cards" apart from "there is nothing more
+  // to load", which is exactly the distinction "Auto-Scroll & Save" needs to
+  // decide whether to keep scrolling or stop.
+  function waitForMoreOffers(previousCount, timeoutMs) {
+    const check = () => {
+      const count = scrapePage().offers.length;
+      return count > previousCount ? count : null;
+    };
+
+    const already = check();
+    if (already !== null) return Promise.resolve(already);
+
+    return new Promise((resolve) => {
+      const observer = new MutationObserver(() => {
+        const result = check();
+        if (result === null) return;
+        observer.disconnect();
+        clearTimeout(timer);
+        resolve(result);
+      });
+      const timer = setTimeout(() => {
+        observer.disconnect();
+        resolve(null);
+      }, timeoutMs);
+      observer.observe(document.body, { childList: true, subtree: true });
+    });
+  }
+
   // --- Native host relay (via background.js -- see its own comment) ------
 
   async function sendScrapeToHost(payload) {
@@ -294,10 +466,25 @@
     return response.reply;
   }
 
+  async function sendCsfloatScrapeToHost(payload) {
+    const response = await browser.runtime.sendMessage({ type: "fetchCsfloatOffers", payload });
+    if (!response.ok) throw new Error(response.error);
+    return response.reply;
+  }
+
   async function sendConstructContractToHost(payload) {
     const response = await browser.runtime.sendMessage({
       type: "constructContract",
       payload: Object.assign({}, payload, { action: "construct_contract" }),
+    });
+    if (!response.ok) throw new Error(response.error);
+    return response.reply;
+  }
+
+  async function sendConstructCsfloatContractToHost(payload) {
+    const response = await browser.runtime.sendMessage({
+      type: "constructCsfloatContract",
+      payload: Object.assign({}, payload, { action: "construct_contract_csfloat" }),
     });
     if (!response.ok) throw new Error(response.error);
     return response.reply;
@@ -497,6 +684,28 @@
         { deep: true }
       );
 
+      // -- market dropdown: which on-disk offer signal ("steam" or
+      // "csfloat", see braindamage.mono_trade_table.INPUT_SOURCES) feeds
+      // the price table, the input-price float diagram, and the EV
+      // diagram -- independent of which site the sidebar is currently
+      // docked on (Refresh always scrapes/saves *this* page's own market;
+      // this only controls what gets *displayed*). Persisted so
+      // webext/overview.js's separate tab can read the same choice. -------
+      const inputSource = ref("steam");
+      browser.storage.local.get("bdInputSource").then((stored) => {
+        if (stored.bdInputSource === "steam" || stored.bdInputSource === "csfloat") {
+          inputSource.value = stored.bdInputSource;
+        }
+      });
+      watch(inputSource, async (value) => {
+        await browser.storage.local.set({ bdInputSource: value });
+        // Re-render the table/diagrams for the newly selected source --
+        // reuses Refresh's own scrape+rebuild rather than a separate
+        // read-only path, so this stays in sync with however Refresh
+        // already resolves "the current skin" for whichever page is open.
+        await refresh();
+      });
+
       // -- main price table ------------------------------------------------
       const fetchFsm = createMachine(
         "fetch",
@@ -531,7 +740,11 @@
       const topRanges = ref([]);
       let floatCharts = null;
 
-      async function runFetchAndRender(scraped) {
+      // `extra` (e.g. { comprehensive: true } from "Auto-Scroll & Save"
+      // below) is merged straight into the host payload alongside the
+      // always-present input_source -- see steam_offers_host.handle_fetch_offers
+      // for what fields it recognizes there.
+      async function runFetchAndRender(scraped, extra) {
         fetchFsm.send("start");
         if (!scraped.offers.length) {
           fetchStatus.value = "No listings found on this page yet -- try Refresh once it's finished loading.";
@@ -547,7 +760,9 @@
         fetchStatus.value = "Working...";
         let reply;
         try {
-          reply = await sendScrapeToHost(scraped);
+          reply = await sendScrapeToHost(
+            Object.assign({}, scraped, { input_source: inputSource.value }, extra || {})
+          );
         } catch (e) {
           fetchStatus.value =
             "Could not reach the native host: " + e.message + "\n(is it installed? see scripts/install_native_host.sh)";
@@ -571,17 +786,78 @@
         fetchFsm.send("succeed");
       }
 
+      // CSfloat counterpart to runFetchAndRender -- same FSM/status/table/
+      // floatDiagrams state, built from scrapeCsfloatPage() and
+      // handle_fetch_csfloat_offers' reply shape instead. No
+      // contractHistory update: "Construct Contract" (trade-*outcome*
+      // combos) stays Steam-only for now, so this leaves whatever
+      // contractHistory already held untouched.
+      async function runCsfloatFetchAndRender(scraped) {
+        fetchFsm.send("start");
+        if (!scraped.offers.length) {
+          fetchStatus.value = "No item cards found on this page yet -- try Refresh once it's finished loading.";
+          fetchFsm.send("fail");
+          return;
+        }
+        if (!scraped.currency) {
+          fetchStatus.value = "Could not detect the page's currency -- refusing to send (this app assumes USD).";
+          fetchFsm.send("fail");
+          return;
+        }
+
+        fetchStatus.value = "Working...";
+        let reply;
+        try {
+          reply = await sendCsfloatScrapeToHost({
+            action: "fetch_csfloat_offers",
+            base_skin_name: scraped.base_skin_name,
+            currency: scraped.currency,
+            input_source: inputSource.value,
+            offers: scraped.offers,
+          });
+        } catch (e) {
+          fetchStatus.value =
+            "Could not reach the native host: " + e.message + "\n(is it installed? see scripts/install_native_host.sh)";
+          fetchFsm.send("fail");
+          return;
+        }
+
+        if (!reply.ok) {
+          fetchStatus.value = reply.error;
+          fetchFsm.send("fail");
+          return;
+        }
+
+        let statusText = `Saved ${reply.written} offer(s) for ${reply.skin_name}.`;
+        if (reply.group_errors && reply.group_errors.length) statusText += "\n" + reply.group_errors.join("\n");
+        if (reply.table_error) statusText += "\n" + reply.table_error;
+        fetchStatus.value = statusText;
+        table.value = reply.table;
+        floatDiagrams.value = reply.float_diagrams || null;
+        fetchFsm.send("succeed");
+      }
+
+      async function refresh() {
+        if (IS_CSFLOAT_HOST) {
+          await runCsfloatFetchAndRender(scrapeCsfloatPage());
+        } else {
+          await runFetchAndRender(scrapePage());
+        }
+      }
+
       // The page is a heavy SPA -- document_idle can fire before its listing
       // rows have actually rendered, so the very first scrape polls for a
       // little while rather than reporting a false "no listings" on every
       // page load. A manual Refresh (after the user scrolls to load more,
       // or changes the wear filter) always scrapes exactly once, immediately.
       async function autoInit() {
+        const scrapeCurrentPage = IS_CSFLOAT_HOST ? scrapeCsfloatPage : scrapePage;
+        const runCurrentPage = IS_CSFLOAT_HOST ? runCsfloatFetchAndRender : runFetchAndRender;
         fetchStatus.value = "Loading...";
         for (let attempt = 0; attempt < 12; attempt++) {
-          const scraped = scrapePage();
+          const scraped = scrapeCurrentPage();
           if (scraped.offers.length > 0) {
-            await runFetchAndRender(scraped);
+            await runCurrentPage(scraped);
             return;
           }
           await sleep(1000);
@@ -651,6 +927,12 @@
       }
 
       async function startRandomFetch() {
+        // Mutual exclusion with "Auto-Scroll & Save" -- both drive this tab
+        // on their own schedule (page navigation vs. repeated scrolling) and
+        // would step on each other's scraping/host writes if run together.
+        // The template also disables this button while Auto-Scroll & Save
+        // is running; this is the defensive backstop.
+        if (autoScrollFsm.is("running")) return;
         fetchStatus.value = "Random Fetch: picking a random skin...";
         let picked;
         try {
@@ -759,6 +1041,128 @@
         await runFetchAndRender(scraped);
       }
 
+      // -- "Auto-Scroll & Save": repeatedly scrolls THIS page (no navigation,
+      // unlike Random Fetch above) to the bottom to trigger Steam's own
+      // infinite-scroll loading, waits for the new cards to actually render,
+      // and repeats -- until either every offer Steam reports via
+      // findResultsCount() is loaded (capped at AUTO_SCROLL_MAX_OFFERS, since
+      // a wildly popular skin's "Found N results" can run into the tens of
+      // thousands and this app has no use for more than the cheapest ~1000),
+      // a stall/round/time tripwire fires, or the user hits Stop. Whatever
+      // ended up loaded is saved either way (see the loop's tail below),
+      // stamped `comprehensive: true` so steam_offers_host records it as a
+      // near-complete snapshot rather than an ordinary single-page scrape --
+      // see SteamOfferSignal.comprehensive. Steam-only for now: CSfloat's
+      // own infinite scroll isn't wired up here.
+      const AUTO_SCROLL_MAX_OFFERS = 1000;
+      const AUTO_SCROLL_MAX_ROUNDS = 400; // hard cap regardless of growth -- 1000 offers / ~20 per round, with margin
+      const AUTO_SCROLL_MAX_STALL_ROUNDS = 4; // consecutive no-growth scrolls before giving up
+      const AUTO_SCROLL_GROWTH_TIMEOUT_MS = 10000; // per-scroll wait for new cards to render
+      const AUTO_SCROLL_MAX_DURATION_MS = 10 * 60 * 1000; // absolute wall-clock abort
+
+      const autoScrollFsm = createMachine(
+        "autoScroll",
+        {
+          idle: { start: "running" },
+          running: { finish: "idle" },
+        },
+        "idle"
+      );
+      const autoScrollProgress = ref({ loaded: 0, target: 0 });
+      // Plain closure flag, not a ref -- only ever read from inside the loop
+      // below (same reasoning as randomFetchWear not needing to survive a
+      // reload: this feature never navigates, so nothing here needs to
+      // persist across a page load).
+      let autoScrollCancelRequested = false;
+
+      function stopAutoScrollAndSave() {
+        autoScrollCancelRequested = true;
+      }
+
+      async function startAutoScrollAndSave() {
+        if (IS_CSFLOAT_HOST || autoScrollFsm.is("running") || randomFetch.value.active) return;
+
+        autoScrollFsm.send("start");
+        autoScrollCancelRequested = false;
+        const startedAt = Date.now();
+
+        // The results count usually renders immediately, but give the page a
+        // few seconds in case this button is clicked right after a fresh
+        // load -- same short-poll shape as autoInit's own first scrape.
+        let target = null;
+        for (let attempt = 0; attempt < 5; attempt++) {
+          if (autoScrollCancelRequested) break;
+          target = findResultsCount();
+          if (target !== null) break;
+          await sleep(1000);
+        }
+        if (autoScrollCancelRequested) {
+          fetchStatus.value = "Auto-Scroll & Save: stopped before starting.";
+          autoScrollFsm.send("finish");
+          return;
+        }
+        if (target === null) {
+          fetchStatus.value =
+            'Auto-Scroll & Save: could not find the "Found N results" count on this page -- aborting.';
+          autoScrollFsm.send("finish");
+          return;
+        }
+
+        const cap = Math.min(target, AUTO_SCROLL_MAX_OFFERS);
+        autoScrollProgress.value = { loaded: scrapePage().offers.length, target: cap };
+
+        let stallRounds = 0;
+        let abortReason = null;
+
+        for (let round = 0; round < AUTO_SCROLL_MAX_ROUNDS; round++) {
+          if (autoScrollCancelRequested) {
+            abortReason = "stopped by user";
+            break;
+          }
+          if (autoScrollProgress.value.loaded >= cap) break;
+          if (Date.now() - startedAt > AUTO_SCROLL_MAX_DURATION_MS) {
+            abortReason = "exceeded the time limit";
+            break;
+          }
+
+          fetchStatus.value = `Auto-Scroll & Save: ${autoScrollProgress.value.loaded}/${cap} loaded -- scrolling...`;
+          scrollListingsToBottom();
+          const grown = await waitForMoreOffers(autoScrollProgress.value.loaded, AUTO_SCROLL_GROWTH_TIMEOUT_MS);
+
+          if (autoScrollCancelRequested) {
+            abortReason = "stopped by user";
+            break;
+          }
+
+          if (grown === null) {
+            stallRounds++;
+            if (stallRounds >= AUTO_SCROLL_MAX_STALL_ROUNDS) {
+              abortReason = "no new listings loaded after several scrolls (likely reached the end)";
+              break;
+            }
+            continue;
+          }
+          stallRounds = 0;
+          autoScrollProgress.value = { loaded: grown, target: cap };
+        }
+
+        if (!abortReason && autoScrollProgress.value.loaded < cap) {
+          abortReason = `hit the ${AUTO_SCROLL_MAX_ROUNDS}-scroll safety limit`;
+        }
+
+        const loaded = autoScrollProgress.value.loaded;
+        fetchStatus.value = abortReason
+          ? `Auto-Scroll & Save: stopped early (${abortReason}) with ${loaded} listing(s) loaded -- saving now...`
+          : `Auto-Scroll & Save: all ${loaded} listing(s) loaded -- saving now...`;
+
+        await runFetchAndRender(scrapePage(), { comprehensive: true });
+        fetchStatus.value += abortReason
+          ? `\n(comprehensive snapshot, incomplete: ${abortReason})`
+          : "\n(comprehensive snapshot, complete)";
+
+        autoScrollFsm.send("finish");
+      }
+
       // -- "Construct Contract" widget: the single best mono trade-up combo
       // buildable from exactly what scrapePage() just found in the browser
       // window, plus highlighting/scrolling to the chosen listings on the
@@ -846,6 +1250,54 @@
         }
       }
 
+      // CSfloat counterpart to runConstructContract -- same FSM/status/
+      // contract state, built from scrapeCsfloatPage() and
+      // handle_construct_contract_csfloat's reply instead. No on-page
+      // highlighting: lastScrapeCardsByFloat is only ever populated by
+      // scrapePage() (Steam's own scraper), so every entry here just gets
+      // element: null -- the listings table below still shows what got
+      // bought, it's just not clickable-to-scroll.
+      async function runCsfloatConstructContract(scraped) {
+        contractFsm.send("start");
+        contractOffers.value = [];
+        contractIndex.value = -1;
+        contract.value = null;
+
+        if (!scraped.offers.length) {
+          contractStatus.value = "No item cards found on this page yet -- try Refresh once it's finished loading.";
+          contractFsm.send("fail");
+          return;
+        }
+        if (!scraped.currency) {
+          contractStatus.value = "Could not detect the page's currency -- refusing to send (this app assumes USD).";
+          contractFsm.send("fail");
+          return;
+        }
+
+        contractStatus.value = "Constructing contract from what's on this page right now...";
+        try {
+          const reply = await sendConstructCsfloatContractToHost({
+            base_skin_name: scraped.base_skin_name,
+            currency: scraped.currency,
+            offers: scraped.offers,
+          });
+          if (!reply.ok) {
+            contractStatus.value = reply.error;
+            contractFsm.send("fail");
+            return;
+          }
+          contract.value = reply.contract;
+          contractHistory.value = reply.contract_history || [];
+          contractOffers.value = reply.contract.offers.map((offer) => ({ offer, element: null }));
+          contractFsm.send("succeed");
+          await nextTick();
+          focusContractOffer(0);
+        } catch (e) {
+          contractStatus.value = "Could not reach the native host: " + e.message;
+          contractFsm.send("fail");
+        }
+      }
+
       // Rebuilds the 3 float-diagram charts whenever floatDiagrams changes
       // (a fresh scrape/refresh, or a new skin's page) -- always destroys
       // whatever charts were drawn before, since v-if unmounts/remounts the
@@ -871,9 +1323,14 @@
       });
 
       onMounted(async () => {
+        // Random Fetch is a Steam-only feature (wear-cycling via Steam's
+        // own filter tabs, page loads only ever to Steam URLs -- see its
+        // block comment up top) -- a persisted "active" state left over
+        // from Steam must never resume its wear-cycling logic if the user
+        // has since navigated to csfloat.com by hand.
         const stored = await browser.storage.local.get(RANDOM_FETCH_STORAGE_KEY);
         const state = stored[RANDOM_FETCH_STORAGE_KEY];
-        if (state && state.active) {
+        if (state && state.active && !IS_CSFLOAT_HOST) {
           randomFetch.value = state;
           await runRandomFetchSkin();
         } else {
@@ -883,16 +1340,22 @@
 
       return {
         sidebar,
+        isCsfloatHost: IS_CSFLOAT_HOST,
+        inputSource,
         openOverview: () => browser.runtime.sendMessage({ type: "openOverview" }),
         toggleSidebar: () => sidebar.send("toggle"),
         randomFetch,
         randomFetchWear,
         startRandomFetch,
         stopRandomFetch,
+        autoScrollFsm,
+        autoScrollProgress,
+        startAutoScrollAndSave,
+        stopAutoScrollAndSave,
         fetchFsm,
         fetchStatus,
         table,
-        refresh: () => runFetchAndRender(scrapePage()),
+        refresh,
         floatDiagrams,
         bucketCanvas,
         revenueCanvas,
@@ -904,7 +1367,8 @@
         contractOffers,
         contractIndex,
         contractHistory,
-        construct: () => runConstructContract(scrapePage()),
+        construct: () =>
+          IS_CSFLOAT_HOST ? runCsfloatConstructContract(scrapeCsfloatPage()) : runConstructContract(scrapePage()),
         focusContractOffer,
         fmtMoney,
         fmtPct,

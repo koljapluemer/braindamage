@@ -91,6 +91,49 @@ def test_offer_price_takes_precedence_and_naive_ev_is_best_available(session, mo
     assert [skin["price_emphasis"] for skin in trade["input_skins"]] == [None, "cheapest"]
 
 
+def test_csfloat_input_source_prices_from_market_offers_not_steam(session):
+    _skin(session, "a", "Input A")
+    _skin(session, "output", "Output", rarity="Restricted")
+    signals.append_steam_offers("a", [signals.SteamOfferSignal(
+        market_hash_name="Input A (Field-Tested)", wear_name="Field-Tested",
+        float_value=0.2, pattern_seed=1, price=999.0, fetched_at=datetime(2026, 1, 2),
+    )])
+    signals.append_market_offers("a", [signals.MarketOfferSignal(
+        source="csfloat", listing_id="l1", market_hash_name="Input A (Field-Tested)",
+        wear_name="Field-Tested", float_value=0.2, price=2.0, listing_type="buy_now",
+        fetched_at=datetime(2026, 1, 2),
+    )])
+
+    result = mono_trade_overview.build_overview(session, input_source="csfloat")
+
+    # Only the csfloat-sourced $2.00 offer should be visible -- the $999
+    # Steam offer must not leak into a csfloat-scoped overview.
+    assert result["trades"][0]["ev_source"] == "naive"
+    prices_csfloat = mono_trade_overview._latest_offer_prices_by_wear("a", "csfloat")
+    prices_steam = mono_trade_overview._latest_offer_prices_by_wear("a", "steam")
+    assert prices_csfloat == {"Field-Tested": 2.0}
+    assert prices_steam == {"Field-Tested": 999.0}
+
+
+def test_csfloat_input_source_excludes_auction_listings(session):
+    _skin(session, "a", "Input A")
+    _skin(session, "output", "Output", rarity="Restricted")
+    signals.append_market_offers("a", [
+        signals.MarketOfferSignal(
+            source="csfloat", listing_id="buy-1", market_hash_name="Input A (Field-Tested)",
+            wear_name="Field-Tested", price=9.0, listing_type="buy_now", fetched_at=datetime(2026, 1, 2),
+        ),
+        signals.MarketOfferSignal(
+            source="csfloat", listing_id="auction-1", market_hash_name="Input A (Field-Tested)",
+            wear_name="Field-Tested", price=0.01, listing_type="auction", fetched_at=datetime(2026, 1, 2),
+        ),
+    ])
+
+    prices = mono_trade_overview._latest_offer_prices_by_wear("a", "csfloat")
+
+    assert prices == {"Field-Tested": 9.0}
+
+
 def test_overview_never_reads_full_legacy_history(session, monkeypatch):
     _skin(session, "a", "Input A")
     _skin(session, "output", "Output", rarity="Restricted")

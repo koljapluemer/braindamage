@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from . import signals
+from . import signals, steam_fees
 from .models import Skin
 from .signals import now_utc
 
@@ -76,6 +76,52 @@ def latest_buy_order_for_wear(skin_id: str, wear_name: str) -> tuple[float, date
         return None
     latest = max(entries, key=lambda e: e.fetched_at)
     return latest.price, latest.fetched_at, latest.num_orders
+
+
+def net_sell_price_for_wear(
+    skin_id: str,
+    wear_name: str,
+    *,
+    legacy_prices: dict[str, tuple[float, datetime]] | None = None,
+) -> tuple[float, datetime, str] | None:
+    """The single, shared definition of "outcome net sell price" -- what a
+    seller would actually walk away with fulfilling a price on Steam
+    Community Market right now, after Steam's real per-sale fee
+    (braindamage.steam_fees). Every consumer that prices a mono trade-up's
+    *outcome* skin (the sidebar table, its float/EV diagrams, and the
+    Construct Contract combo search, for both Steam and CSFloat) MUST go
+    through this, not its own independently-computed version -- those used
+    to disagree (the table preferred a buy-order price while Construct
+    Contract silently ignored buy orders entirely and used a plain last-
+    price instead), which is exactly the kind of drift this function exists
+    to make impossible.
+
+    A buy-order-book price (latest_buy_order_for_wear) wins whenever one's
+    on disk -- an instant sale, no listing needed, so it's the best price
+    actually obtainable right now. Otherwise `legacy_prices[wear_name]` if
+    `legacy_prices` was given (the one-time overview snapshot -- see
+    mono_trade_overview, which must never fall through to the full
+    historical pricing reader for its naive-EV priming pass), else the
+    general last-price resolution (latest_price_for_wear).
+
+    Returns (net_price, observed_at, source) where source is "buy_order" or
+    "fallback" -- callers that color-code by source/freshness (the sidebar
+    table) key off `source`; those that only need the number (Construct
+    Contract, the float diagrams) can ignore it. None if there's no price
+    for this wear at all.
+    """
+    buy_order = latest_buy_order_for_wear(skin_id, wear_name)
+    if buy_order is not None:
+        price, fetched_at, _num_orders = buy_order
+        return steam_fees.net_proceeds(price), fetched_at, "buy_order"
+
+    price_info = (
+        legacy_prices.get(wear_name) if legacy_prices is not None else latest_price_for_wear(skin_id, wear_name)
+    )
+    if price_info is None:
+        return None
+    price, observed_at = price_info
+    return steam_fees.net_proceeds(price), observed_at, "fallback"
 
 
 def recalculate_last_price(skin: Skin) -> None:

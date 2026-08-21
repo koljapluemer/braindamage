@@ -34,15 +34,26 @@
 
         <div class="flex items-center gap-2 whitespace-nowrap">
           <strong class="flex-1 text-[#66c0f4] text-[13px]">braindamage</strong>
+          <select v-model="inputSource" :class="btnClass"
+                  title="Which market's input prices feed the overview table, input graph, and EV diagram">
+            <option value="steam">Steam</option>
+            <option value="csfloat">CSfloat</option>
+          </select>
           <button type="button" :class="btnClass" @click="openOverview">Overview</button>
-          <button type="button" :class="btnClass" :disabled="fetchFsm.is('loading')" @click="refresh">Refresh</button>
-          <button type="button" :class="btnClass" :disabled="contractFsm.is('loading')" @click="construct"
+          <button type="button" :class="btnClass" :disabled="fetchFsm.is('loading') || autoScrollFsm.is('running')" @click="refresh">Refresh</button>
+          <button type="button" :class="btnClass" :disabled="contractFsm.is('loading') || autoScrollFsm.is('running')" @click="construct"
                   title="Run the buy combo search on just what's visible on this page right now">
             Construct Contract
           </button>
-          <button type="button" :class="btnClass" @click="startRandomFetch"
+          <button v-if="!isCsfloatHost" type="button" :class="btnClass" @click="startRandomFetch"
+                  :disabled="autoScrollFsm.is('running')"
                   title="Continuously cycle random skins through every wear level, fetching offers for each">
             Random Fetch
+          </button>
+          <button v-if="!isCsfloatHost" type="button" :class="btnClass" @click="startAutoScrollAndSave"
+                  :disabled="autoScrollFsm.is('running') || randomFetch.active"
+                  title="Scroll to the bottom repeatedly to load every offer on this page (up to 1000), then save the full batch as a comprehensive snapshot">
+            Auto-Scroll &amp; Save
           </button>
           <button type="button" :class="btnClass" title="Collapse" @click="toggleSidebar">&raquo;</button>
         </div>
@@ -200,5 +211,13 @@
                 class="bg-[#8b2f2f] text-white border border-white/25 rounded-sm px-3 py-1.5 text-[12px] cursor-pointer hover:bg-[#a83a3a] shadow-[0_2px_8px_rgba(0,0,0,0.5)]"
                 @click="stopRandomFetch">
           Stop Random Fetch ({{ randomFetch.skinName }}{{ randomFetchWear ? ' — ' + randomFetchWear : '' }})
+        </button>
+      </div>
+
+      <div v-if="autoScrollFsm.is('running')" class="fixed top-2.5 left-2.5 z-[2147483000]">
+        <button type="button"
+                class="bg-[#8b2f2f] text-white border border-white/25 rounded-sm px-3 py-1.5 text-[12px] cursor-pointer hover:bg-[#a83a3a] shadow-[0_2px_8px_rgba(0,0,0,0.5)]"
+                @click="stopAutoScrollAndSave">
+          Stop Auto-Scroll &amp; Save ({{ autoScrollProgress.loaded }}/{{ autoScrollProgress.target }})
         </button>
       </div>

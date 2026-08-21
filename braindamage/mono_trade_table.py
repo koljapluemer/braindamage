@@ -17,12 +17,14 @@ acceptable for this "at a glance" sidebar view.
 from __future__ import annotations
 
 import urllib.parse
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import pricing, signals, steam_fees
+from . import pricing, signals
 from .market_names import market_hash_name
 from .models import Skin
 from .signals import now_utc
@@ -30,6 +32,17 @@ from .tradeup import WEAR_BUCKETS, next_rarity, wear_for_float
 
 REQUIRED_INPUTS = 10
 STEAM_LISTING_BASE_URL = "https://steamcommunity.com/market/listings/730/"
+
+# Which on-disk offer signal an "input price" comes from -- "steam"
+# (SteamOfferSignal, scraped from a Steam Community Market listing page) or
+# "csfloat" (MarketOfferSignal with source == "csfloat", scraped from a
+# CSFloat search page -- see webext/sidebar.js's CSFloat scraper). Selected by
+# the sidebar's market dropdown and threaded through build_table/
+# build_float_diagram_data (and braindamage.mono_trade_overview.build_overview,
+# which shares this constant) so every input-price consumer stays in sync on
+# what "the other" valid value even is.
+INPUT_SOURCES = ("steam", "csfloat")
+DEFAULT_INPUT_SOURCE = "steam"
 
 _NON_WEAPON_CATEGORIES = ["Knives", "Gloves"]
 
@@ -73,33 +86,63 @@ def _age_color(fetched_at: datetime, *, stale: str = "orange") -> str:
     return stale
 
 
-def _listing_key(offer: signals.SteamOfferSignal) -> tuple[float | None, int | None, float]:
-    """Synthetic per-offer dedup identity -- see SteamOfferSignal's docstring.
-    Includes price, so re-observing the exact same listing at a changed price
-    doesn't collapse the two observations into one (the caller decides which
-    one wins)."""
-    return (offer.float_value, offer.pattern_seed, offer.price)
+@dataclass(frozen=True)
+class _NormOffer:
+    """One input-price offer, stripped down to exactly what _cheapest_ten_cost
+    needs, regardless of which on-disk signal type it came from -- see
+    _offers_for_wear. `key` is the price-inclusive dedup identity (two
+    observations of the same physical listing at the same price collapse to
+    one); `identity` is the price-*exclusive* one (the same physical listing
+    re-observed at a changed price is still "the same listing" for topup
+    purposes -- see _cheapest_ten_cost)."""
+
+    price: float
+    fetched_at: datetime
+    key: Any
+    identity: Any
 
 
-def _listing_identity(offer: signals.SteamOfferSignal) -> tuple:
-    """Same physical-listing identity as _listing_key but *without* price, so
-    a listing re-observed at a different price is still recognized as "the
-    same listing" -- used to keep an older, cheaper observation of a listing
-    that's already present in the latest batch from being double-counted.
-    Floatless items (no float_value) have no such stable identity, so they
-    fall back to the price-inclusive key instead."""
-    if offer.float_value is not None:
-        return (offer.float_value, offer.pattern_seed)
-    return _listing_key(offer)
+def _offers_for_wear(skin_id: str, wear_name: str, source: str) -> list[_NormOffer]:
+    """Every on-disk input-price offer for `skin_id` at `wear_name` from
+    `source` ("steam" or "csfloat"), normalized to _NormOffer.
+
+    CSFloat listings (signals.MarketOfferSignal) carry a real listing_id, so
+    that alone is both the dedup key and the physical-listing identity --
+    and are filtered to listing_type == "buy_now" only: an auction's
+    displayed price is just the current bid, not a price actually payable
+    right now (it can still rise before the auction ends), so it's excluded
+    from cost math the same way braindamage.mono_offer_combos already
+    excludes auctions from combo construction. Steam listings
+    (signals.SteamOfferSignal) expose no stable ID -- see that class's own
+    docstring -- so (float_value, pattern_seed, price) stands in as the
+    dedup key and (float_value, pattern_seed) as the price-exclusive
+    identity, unchanged from this module's pre-CSFloat behavior.
+    """
+    if source == "csfloat":
+        return [
+            _NormOffer(price=o.price, fetched_at=o.fetched_at, key=o.listing_id, identity=o.listing_id)
+            for o in signals.read_market_offers(skin_id)
+            if o.source == "csfloat" and o.wear_name == wear_name and o.listing_type == "buy_now"
+        ]
+    return [
+        _NormOffer(
+            price=o.price,
+            fetched_at=o.fetched_at,
+            key=(o.float_value, o.pattern_seed, o.price),
+            identity=(o.float_value, o.pattern_seed) if o.float_value is not None else (o.float_value, o.pattern_seed, o.price),
+        )
+        for o in signals.read_steam_offers(skin_id)
+        if o.wear_name == wear_name
+    ]
 
 
-def _cheapest_ten_cost(skin_id: str, wear_name: str) -> tuple[float, datetime] | None:
+def _cheapest_ten_cost(skin_id: str, wear_name: str, source: str = DEFAULT_INPUT_SOURCE) -> tuple[float, datetime] | None:
     """Cost to buy REQUIRED_INPUTS offers of `skin_id` at `wear_name` right
-    now, plus the oldest fetch time among the offers actually used (the
-    cell's color is keyed off that oldest point, not the newest, so the
-    color reflects the staleness of the whole calculation) -- None if there
-    still aren't enough offers on disk for that wear even after the fallback
-    below.
+    now from `source`, plus the oldest fetch time among the offers actually
+    used (the cell's color is keyed off that oldest point, not the newest, so
+    the color reflects the staleness of the whole calculation) -- None if
+    there still aren't enough offers on disk for that wear/source even after
+    the fallback below.
 
     Prices from the *latest scrape batch* (offers sharing the same
     fetched_at -- one page refresh, see steam_offers_host) whenever that
@@ -110,7 +153,7 @@ def _cheapest_ten_cost(skin_id: str, wear_name: str) -> tuple[float, datetime] |
     on disk (excluding any listing already represented in the batch), same
     as this table always has -- see spec.md.
     """
-    offers = [o for o in signals.read_steam_offers(skin_id) if o.wear_name == wear_name]
+    offers = _offers_for_wear(skin_id, wear_name, source)
     if not offers:
         return None
 
@@ -118,24 +161,23 @@ def _cheapest_ten_cost(skin_id: str, wear_name: str) -> tuple[float, datetime] |
     batch = [o for o in offers if o.fetched_at == latest_fetched_at]
     older = [o for o in offers if o.fetched_at != latest_fetched_at]
 
-    batch_by_key: dict[tuple, signals.SteamOfferSignal] = {}
+    batch_by_key: dict[Any, _NormOffer] = {}
     for offer in batch:
-        batch_by_key[_listing_key(offer)] = offer
+        batch_by_key[offer.key] = offer
     batch_offers = sorted(batch_by_key.values(), key=lambda o: o.price)
 
     if len(batch_offers) >= REQUIRED_INPUTS:
         cheapest = batch_offers[:REQUIRED_INPUTS]
         return sum(o.price for o in cheapest), latest_fetched_at
 
-    batch_identities = {_listing_identity(o) for o in batch_offers}
-    older_by_key: dict[tuple, signals.SteamOfferSignal] = {}
+    batch_identities = {o.identity for o in batch_offers}
+    older_by_key: dict[Any, _NormOffer] = {}
     for offer in older:
-        if _listing_identity(offer) in batch_identities:
+        if offer.identity in batch_identities:
             continue
-        key = _listing_key(offer)
-        existing = older_by_key.get(key)
+        existing = older_by_key.get(offer.key)
         if existing is None or offer.fetched_at > existing.fetched_at:
-            older_by_key[key] = offer
+            older_by_key[offer.key] = offer
 
     shortfall = REQUIRED_INPUTS - len(batch_offers)
     topped_up = sorted(older_by_key.values(), key=lambda o: o.price)[:shortfall]
@@ -150,29 +192,18 @@ def _outcome_price_cell(
     wear_name: str,
     legacy_prices: dict[str, tuple[float, datetime]] | None = None,
 ) -> dict:
-    """The best available NET sell-side price for one outcome skin at one
-    wear -- what you'd actually walk away with fulfilling that price on
-    Steam Community Market right now, after Steam's real per-sale fee (see
-    braindamage.steam_fees), not the raw gross buy-order/listing price:
-    a buy-order-book summary if one's on disk (the best possible outcome
-    price -- an instant sale, no listing needed), colored by its own age;
-    otherwise whatever braindamage.pricing's general last-price resolution
-    has, colored grey regardless of age since it's a materially weaker
-    signal (see spec.md)."""
-    buy_order = pricing.latest_buy_order_for_wear(skin_id, wear_name)
-    if buy_order is not None:
-        price, fetched_at, _num_orders = buy_order
-        return {"value": steam_fees.net_proceeds(price), "color": _age_color(fetched_at), "source": "buy_order"}
-
-    price_info = (
-        legacy_prices.get(wear_name)
-        if legacy_prices is not None
-        else pricing.latest_price_for_wear(skin_id, wear_name)
-    )
-    if price_info is None:
+    """The cell rendering of pricing.net_sell_price_for_wear (see there for
+    the actual price resolution, shared with offer_combos' Construct
+    Contract search and this module's own build_float_diagram_data so all
+    three agree) -- a buy-order price is colored by its own age, a fallback
+    price is always grey regardless of age since it's a materially weaker
+    signal."""
+    resolved = pricing.net_sell_price_for_wear(skin_id, wear_name, legacy_prices=legacy_prices)
+    if resolved is None:
         return {"value": None, "color": None, "source": None}
-    price, _observed_at = price_info
-    return {"value": steam_fees.net_proceeds(price), "color": "grey", "source": "fallback"}
+    net_price, observed_at, source = resolved
+    color = _age_color(observed_at) if source == "buy_order" else "grey"
+    return {"value": net_price, "color": color, "source": source}
 
 
 def _resolve_outcome_skins(session: Session, skin: Skin) -> list[Skin]:
@@ -212,11 +243,13 @@ def build_table(
     skin: Skin,
     *,
     legacy_prices_by_skin: dict[str, dict[str, tuple[float, datetime]]] | None = None,
+    input_source: str = DEFAULT_INPUT_SOURCE,
 ) -> dict:
     """The full sidebar table for `skin`: one row per wear tier, with `skin`'s
-    own buy-10-cost, every possible mono-trade outcome's price, and a
-    per-row EV. Raises MonoTradeTableError if `skin` isn't a valid trade-up
-    input at all, or its collection has no eligible output to trade into."""
+    own buy-10-cost (priced from `input_source` -- "steam" or "csfloat", see
+    INPUT_SOURCES), every possible mono-trade outcome's price, and a per-row
+    EV. Raises MonoTradeTableError if `skin` isn't a valid trade-up input at
+    all, or its collection has no eligible output to trade into."""
     outcome_skins = _resolve_outcome_skins(session, skin)
     probability = 1.0 / len(outcome_skins)
 
@@ -226,7 +259,7 @@ def build_table(
 
     rows = []
     for wear_name, _lo, _hi in WEAR_BUCKETS:
-        cost = _cheapest_ten_cost(skin.id, wear_name)
+        cost = _cheapest_ten_cost(skin.id, wear_name, input_source)
         if cost is None:
             input_cell = {"value": None, "color": None}
         else:
@@ -275,23 +308,34 @@ def build_table(
 FLOAT_DIAGRAM_MAX_BATCHES = 20
 
 
-def build_float_diagram_data(session: Session, skin: Skin) -> dict:
+def build_float_diagram_data(session: Session, skin: Skin, *, input_source: str = DEFAULT_INPUT_SOURCE) -> dict:
     """Raw data for the sidebar's float-vs-price/revenue/EV diagrams
-    (webext/float_diagrams.js) -- every individual Steam offer observed for
-    `skin` across its FLOAT_DIAGRAM_MAX_BATCHES most recent fetch batches
-    (for the price-vs-float scatter/bucket chart), plus each relevant skin's
-    own float range and per-wear net outcome price (for the input-float ->
-    output-revenue curve). The bucketing/weighting/EV math itself lives
-    client-side (it's cheap, pure, and only needed for rendering) -- this
-    just gathers exactly what that math needs, in one shape. Raises
-    MonoTradeTableError under the same conditions as build_table (they share
+    (webext/float_diagrams.js) -- every individual input-price offer observed
+    for `skin` from `input_source` ("steam" or "csfloat", see INPUT_SOURCES)
+    across its FLOAT_DIAGRAM_MAX_BATCHES most recent fetch batches (for the
+    price-vs-float scatter/bucket chart), plus each relevant skin's own float
+    range and per-wear net outcome price (for the input-float -> output-
+    revenue curve). The bucketing/weighting/EV math itself lives client-side
+    (it's cheap, pure, and only needed for rendering) -- this just gathers
+    exactly what that math needs, in one shape. Raises MonoTradeTableError
+    under the same conditions as build_table (they share
     _resolve_outcome_skins), since a skin that isn't a usable trade-up input
     has no revenue/EV curve to plot either.
     """
     outcome_skins = _resolve_outcome_skins(session, skin)
     probability = 1.0 / len(outcome_skins)
 
-    offers = [o for o in signals.read_steam_offers(skin.id) if o.float_value is not None]
+    if input_source == "csfloat":
+        # buy_now only -- see _offers_for_wear's docstring for why an
+        # auction's displayed price (just the current bid, not a price
+        # actually payable right now) has no place in this diagram either.
+        offers = [
+            o
+            for o in signals.read_market_offers(skin.id)
+            if o.source == "csfloat" and o.float_value is not None and o.listing_type == "buy_now"
+        ]
+    else:
+        offers = [o for o in signals.read_steam_offers(skin.id) if o.float_value is not None]
     batch_times = sorted({o.fetched_at for o in offers}, reverse=True)[:FLOAT_DIAGRAM_MAX_BATCHES]
     batch_rank = {fetched_at: rank for rank, fetched_at in enumerate(batch_times)}  # 0 == most recent
     offer_points = [
@@ -309,12 +353,14 @@ def build_float_diagram_data(session: Session, skin: Skin) -> dict:
     ]
 
     def _outcome_entry(outcome: Skin) -> dict:
-        prices_by_wear = pricing.latest_prices_by_wear(outcome.id)
-        net_price_by_wear = {
-            wear_name: steam_fees.net_proceeds(prices_by_wear[wear_name][0])
-            for wear_name, _lo, _hi in WEAR_BUCKETS
-            if wear_name in prices_by_wear
-        }
+        # Same pricing.net_sell_price_for_wear every other outcome-price
+        # consumer uses (the sidebar table, Construct Contract) -- a
+        # buy-order price wins when one's on disk, same as there.
+        net_price_by_wear = {}
+        for wear_name, _lo, _hi in WEAR_BUCKETS:
+            resolved = pricing.net_sell_price_for_wear(outcome.id, wear_name)
+            if resolved is not None:
+                net_price_by_wear[wear_name] = resolved[0]
         return {
             "skin_id": outcome.id,
             "skin_name": outcome.name,

@@ -1,1 +1,0 @@
-favoriting/unfavoriting in the COntract list should not lose marking/focus on the contract, that's confusing. There must be a qt pattern to do this right?

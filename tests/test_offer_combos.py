@@ -104,6 +104,29 @@ class TestBestCombosForSkin:
         assert best.outcomes[0].predicted_wear == "Factory New"
         assert best.expected_value == pytest.approx(steam_fees.net_proceeds(100.0) - best.real_cost)
 
+    def test_prefers_buy_order_price_over_fallback_same_as_the_sidebar_table(self, session):
+        # Regression: Construct Contract's outcome pricing used to call
+        # pricing.latest_prices_by_wear directly, silently ignoring any
+        # buy-order-book price -- disagreeing with mono_trade_table's own
+        # outcome cell for the exact same skin+wear. Both must now resolve
+        # through pricing.net_sell_price_for_wear and agree.
+        _setup_mono_pair(session)  # seeds out-a with a $100 PriceObservationSignal
+        signals.append_buy_order_summaries(
+            "out-a",
+            [
+                signals.BuyOrderSummarySignal(
+                    market_hash_name="Output A (Factory New)", wear_name="Factory New",
+                    price=250.0, num_orders=5, fetched_at=now_utc(),
+                )
+            ],
+        )
+        offers = [FakeOffer(price=float(i), float_value=0.02 + i * 0.001) for i in range(10)]
+        skin = session.get(Skin, "in-a")
+
+        best = offer_combos.best_combos_for_skin(session, skin, offers, top_n=1)[0]
+
+        assert best.outcomes[0].net_price == pytest.approx(steam_fees.net_proceeds(250.0))
+
     def test_invalid_input_skin_returns_nothing(self, session):
         _make_skin(session, id="in-covert", name="Input Covert", rarity_name="Covert")
         offers = [FakeOffer(price=float(i), float_value=0.02) for i in range(10)]

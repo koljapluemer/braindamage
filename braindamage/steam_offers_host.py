@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import struct
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, BinaryIO
 
@@ -28,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from . import config, mono_trade_overview, mono_trade_table, offer_combos, signals
 from .db import SessionLocal, upgrade_database
-from .market_names import parse_market_hash_name
+from .market_names import market_hash_name, parse_market_hash_name
 from .models import Skin
 from .signals import SteamOfferSignal
 
@@ -39,6 +40,50 @@ from .signals import SteamOfferSignal
 # downstream (pricing, EV math), so silently accepting an unconvertible
 # currency would corrupt that math with no error.
 _SUPPORTED_CURRENCIES = ("USD", "EUR")
+
+
+def _validate_currency(currency: str) -> dict[str, Any] | None:
+    """Shared front half of both _validate_and_prepare (Steam) and
+    _validate_and_prepare_csfloat: {"ok": False, ...} if `currency` isn't
+    usable, else None."""
+    if currency not in _SUPPORTED_CURRENCIES:
+        return {
+            "ok": False,
+            "error": (
+                f"Account currency is {currency!r} -- only {'/'.join(_SUPPORTED_CURRENCIES)} are "
+                "supported. Set your account region/currency to one of those and re-scrape."
+            ),
+        }
+    if currency == "EUR" and config.EUR_USD_RATE is None:
+        return {
+            "ok": False,
+            "error": "Currency is EUR but EUR_USD_RATE isn't set in .env -- see .env.example.",
+        }
+    return None
+
+
+def _to_usd(price: float, currency: str) -> tuple[float, dict[str, Any]]:
+    """Converts one scraped price to USD, returning (usd_price, raw) where
+    `raw` records the original currency/rate when a conversion happened (see
+    SteamOfferSignal.raw / MarketOfferSignal.raw) -- empty for USD, since
+    there's nothing to record. Caller must have already validated `currency`
+    via _validate_currency."""
+    if currency == "EUR":
+        return price * config.EUR_USD_RATE, {
+            "original_currency": "EUR",
+            "original_price": price,
+            "eur_usd_rate": config.EUR_USD_RATE,
+        }
+    return price, {}
+
+
+def _resolved_input_source(payload: dict[str, Any]) -> str:
+    """payload["input_source"] (the sidebar's market dropdown -- see
+    mono_trade_table.INPUT_SOURCES) if it's a recognized value, else the
+    default -- never lets a stale/out-of-sync extension send something this
+    host can't handle through to build_table/build_float_diagram_data."""
+    source = payload.get("input_source")
+    return source if source in mono_trade_table.INPUT_SOURCES else mono_trade_table.DEFAULT_INPUT_SOURCE
 
 
 @dataclass
@@ -69,19 +114,9 @@ def _validate_and_prepare(session: Session, payload: dict[str, Any]) -> _Prepare
     if not isinstance(market_hash_name, str) or not isinstance(offers, list):
         return {"ok": False, "error": "Malformed payload: market_hash_name must be a string, offers a list"}
 
-    if currency not in _SUPPORTED_CURRENCIES:
-        return {
-            "ok": False,
-            "error": (
-                f"Steam account currency is {currency!r} -- only {'/'.join(_SUPPORTED_CURRENCIES)} are "
-                "supported. Set your Steam account region/currency to one of those and re-scrape."
-            ),
-        }
-    if currency == "EUR" and config.EUR_USD_RATE is None:
-        return {
-            "ok": False,
-            "error": "Currency is EUR but EUR_USD_RATE isn't set in .env -- see .env.example.",
-        }
+    currency_error = _validate_currency(currency)
+    if currency_error is not None:
+        return currency_error
 
     base_name, wear_name, stattrak, souvenir = parse_market_hash_name(market_hash_name)
     if wear_name is None:
@@ -108,15 +143,10 @@ def _validate_and_prepare(session: Session, payload: dict[str, Any]) -> _Prepare
     # page scrape) by exact fetched_at equality, so entries from the same
     # scrape must carry an identical timestamp.
     fetched_at = signals.now_utc()
+    comprehensive = bool(payload.get("comprehensive"))
     entries = []
     for offer in offers:
-        original_price = offer["price"]
-        if currency == "EUR":
-            usd_price = original_price * config.EUR_USD_RATE
-            raw = {"original_currency": "EUR", "original_price": original_price, "eur_usd_rate": config.EUR_USD_RATE}
-        else:
-            usd_price = original_price
-            raw = {}
+        usd_price, raw = _to_usd(offer["price"], currency)
         entries.append(
             SteamOfferSignal(
                 market_hash_name=market_hash_name,
@@ -126,6 +156,7 @@ def _validate_and_prepare(session: Session, payload: dict[str, Any]) -> _Prepare
                 price=usd_price,
                 currency="USD",
                 fetched_at=fetched_at,
+                comprehensive=comprehensive,
                 raw=raw,
             )
         )
@@ -145,12 +176,7 @@ def _write_buy_order_summary(payload: dict[str, Any], prepared: _Prepared, curre
     bo_num_orders = buy_order_summary.get("num_orders")
     if not bo_wear or bo_price is None or bo_num_orders is None:
         return False
-    if currency == "EUR":
-        usd_bo_price = bo_price * config.EUR_USD_RATE
-        bo_raw = {"original_currency": "EUR", "original_price": bo_price, "eur_usd_rate": config.EUR_USD_RATE}
-    else:
-        usd_bo_price = bo_price
-        bo_raw = {}
+    usd_bo_price, bo_raw = _to_usd(bo_price, currency)
     signals.append_buy_order_summaries(
         prepared.skin.id,
         [
@@ -183,6 +209,18 @@ def _recent_contract_history(skin_id: str, limit: int = 5) -> list[dict[str, Any
     ]
 
 
+def _offer_pattern_seed(offer: Any) -> int | None:
+    """pattern_seed for one combo offer -- SteamOfferSignal carries it as a
+    real field; MarketOfferSignal (CSFloat) has no such field at all, so
+    _validate_and_prepare_csfloat stashes it inside `raw` instead. Tolerant
+    of either shape so _serialize_combo works for combos built from both."""
+    seed = getattr(offer, "pattern_seed", None)
+    if seed is not None:
+        return seed
+    raw = getattr(offer, "raw", None)
+    return raw.get("pattern_seed") if isinstance(raw, dict) else None
+
+
 def _serialize_combo(combo: offer_combos.ComboResult) -> dict[str, Any]:
     """JSON-safe rendering of one offer_combos.ComboResult for the sidebar's
     "Construct Contract" widget -- same fields braindamage.steam_offer_combos_report
@@ -205,7 +243,7 @@ def _serialize_combo(combo: offer_combos.ComboResult) -> dict[str, Any]:
             {
                 "wear_name": o.wear_name,
                 "float_value": o.float_value,
-                "pattern_seed": o.pattern_seed,
+                "pattern_seed": _offer_pattern_seed(o),
                 "price": o.price,
             }
             for o in sorted(combo.offers, key=lambda o: o.price)
@@ -234,7 +272,21 @@ def handle_fetch_offers(session: Session, payload: dict[str, Any]) -> dict[str, 
          "offers": [{"wear_name": str | None, "float_value": float,
                      "pattern_seed": int | None, "price": float}, ...],
          "buy_order_summary": {"wear_name": str, "price": float,
-                                "num_orders": int} | None}
+                                "num_orders": int} | None,
+         "input_source": "steam" | "csfloat" | None,
+         "comprehensive": bool | None}
+
+    comprehensive (default False) is set by the sidebar's "Auto-Scroll &
+    Save" flow, which scrolls the listing page to load as many offers as
+    Steam will render (up to 1000) before calling this -- it's stamped onto
+    every SteamOfferSignal written here (see that class) so a near-complete
+    snapshot can be told apart from an ordinary single-page scrape later.
+
+    input_source (default "steam" -- see mono_trade_table.INPUT_SOURCES)
+    only controls which on-disk offer signal the *returned* "table"/
+    "float_diagrams" are priced from -- it has no effect on what gets
+    written: this scrape's own offers are always saved as SteamOfferSignal,
+    regardless of the sidebar's market dropdown.
 
     market_hash_name only needs to be ONE representative "<name> (<wear>)"
     string (used to resolve the Skin) -- a single Steam Market page can list
@@ -264,13 +316,14 @@ def handle_fetch_offers(session: Session, payload: dict[str, Any]) -> dict[str, 
 
     signals.append_steam_offers(skin.id, prepared.entries)
     buy_order_written = _write_buy_order_summary(payload, prepared, payload["currency"])
+    input_source = _resolved_input_source(payload)
 
     table = None
     table_error = None
     float_diagrams = None
     try:
-        table = mono_trade_table.build_table(session, skin)
-        float_diagrams = mono_trade_table.build_float_diagram_data(session, skin)
+        table = mono_trade_table.build_table(session, skin, input_source=input_source)
+        float_diagrams = mono_trade_table.build_float_diagram_data(session, skin, input_source=input_source)
     except mono_trade_table.MonoTradeTableError as exc:
         table_error = str(exc)
 
@@ -348,6 +401,253 @@ def handle_construct_contract(session: Session, payload: dict[str, Any]) -> dict
     }
 
 
+@dataclass
+class _CsfloatGroup:
+    """One (stattrak, souvenir) group of offers scraped from a single CSFloat
+    search page, resolved to its catalog Skin -- see
+    _validate_and_prepare_csfloat's docstring for why a page can span more
+    than one group at once."""
+
+    skin: Skin
+    entries: list[signals.MarketOfferSignal]
+
+
+def _validate_and_prepare_csfloat(
+    session: Session, payload: dict[str, Any]
+) -> tuple[list[_CsfloatGroup], list[str]] | dict[str, Any]:
+    """CSFloat counterpart to _validate_and_prepare: validates the payload
+    shape and currency, then resolves every offer to a catalog Skin and
+    converts it to a MarketOfferSignal. Returns a `dict` (the {"ok": False,
+    ...} error reply) on a payload-level failure -- callers must check
+    `isinstance(result, dict)` before touching it as the (groups, errors)
+    tuple.
+
+    Unlike a Steam listing page (one market_hash_name, so exactly one Skin),
+    a CSFloat search page scoped to one weapon+paint can mix StatTrak/
+    Souvenir/normal listings together (see webext/sidebar.js's CSFloat
+    scraper) -- each is a genuinely different catalog Skin, so offers are
+    grouped by (stattrak, souvenir) and each group resolved independently.
+    A group that fails to resolve (no match, or an ambiguous Doppler-phase
+    collision) is dropped with its own message in the returned error list
+    rather than failing the whole request -- the other groups still get
+    saved.
+    """
+    try:
+        base_skin_name = payload["base_skin_name"]
+        currency = payload["currency"]
+        offers = payload["offers"]
+    except KeyError as exc:
+        return {"ok": False, "error": f"Malformed payload: missing {exc}"}
+    if not isinstance(base_skin_name, str) or not isinstance(offers, list):
+        return {"ok": False, "error": "Malformed payload: base_skin_name must be a string, offers a list"}
+
+    currency_error = _validate_currency(currency)
+    if currency_error is not None:
+        return currency_error
+
+    offers_by_variant: dict[tuple[bool, bool], list[dict[str, Any]]] = defaultdict(list)
+    for offer in offers:
+        offers_by_variant[(bool(offer.get("stattrak")), bool(offer.get("souvenir")))].append(offer)
+
+    # One shared timestamp for every offer in this scrape -- see
+    # _validate_and_prepare's identical rationale (mono_trade_table groups
+    # offers into "batches" by exact fetched_at equality).
+    fetched_at = signals.now_utc()
+    groups: list[_CsfloatGroup] = []
+    errors: list[str] = []
+
+    for (stattrak, souvenir), variant_offers in offers_by_variant.items():
+        query = select(Skin).where(
+            Skin.name == base_skin_name, Skin.stattrak == stattrak, Skin.souvenir == souvenir
+        )
+        matches = list(session.scalars(query).all())
+        label = f"{'StatTrak™ ' if stattrak else 'Souvenir ' if souvenir else ''}{base_skin_name}"
+        if not matches:
+            errors.append(f"No matching skin in the catalog for {label!r}")
+            continue
+        if len(matches) > 1:
+            errors.append(
+                f"Ambiguous: {len(matches)} skins match {label!r} (likely a Doppler/Gamma Doppler "
+                "phase collision) -- can't disambiguate phase from CSFloat's listing name alone."
+            )
+            continue
+        skin = matches[0]
+
+        entries = []
+        for offer in variant_offers:
+            usd_price, raw = _to_usd(offer["price"], currency)
+            raw["pattern_seed"] = offer.get("pattern_seed")
+            wear_name = offer.get("wear_name")
+            entries.append(
+                signals.MarketOfferSignal(
+                    source="csfloat",
+                    listing_id=str(offer["listing_id"]),
+                    market_hash_name=market_hash_name(skin, wear_name) if wear_name else base_skin_name,
+                    wear_name=wear_name,
+                    float_value=offer.get("float_value"),
+                    price=usd_price,
+                    currency="USD",
+                    listing_type=offer.get("listing_type") or "buy_now",
+                    fetched_at=fetched_at,
+                    raw=raw,
+                )
+            )
+        groups.append(_CsfloatGroup(skin=skin, entries=entries))
+
+    return groups, errors
+
+
+def handle_fetch_csfloat_offers(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    """Validates and writes one CSFloat search-page scrape (webext/sidebar.js,
+    the CSfloat counterpart to handle_fetch_offers); never raises for an
+    expected failure mode -- always returns {"ok": False, ...} instead.
+
+    Expected payload shape:
+        {"base_skin_name": str, "currency": str,
+         "offers": [{"wear_name": str | None, "float_value": float | None,
+                     "pattern_seed": int | None, "price": float,
+                     "stattrak": bool, "souvenir": bool,
+                     "listing_id": str, "listing_type": str}, ...],
+         "input_source": "steam" | "csfloat" | None}
+
+    base_skin_name has no wear/StatTrak/Souvenir baked in (unlike Steam's
+    market_hash_name) -- CSFloat's item-name element never renders those
+    (see webext/sidebar.js's CSFloat scraper), so each offer carries its own
+    stattrak/souvenir flags instead, and offers are grouped by that pair
+    before being resolved to a Skin (see _validate_and_prepare_csfloat).
+
+    On success, "table"/"float_diagrams" are built (see
+    mono_trade_table.build_table/build_float_diagram_data, priced from
+    `input_source`, default "steam") for whichever resolved group had the
+    most offers -- a page mixing e.g. StatTrak and normal listings still
+    needs exactly one skin to show the sidebar's table for. "group_errors"
+    carries a message for every (stattrak, souvenir) group that failed to
+    resolve, if any -- the groups that DID resolve are still saved.
+    """
+    prepared = _validate_and_prepare_csfloat(session, payload)
+    if isinstance(prepared, dict):
+        return prepared
+    groups, errors = prepared
+    if not groups:
+        return {"ok": False, "error": "; ".join(errors) or "No offers to save"}
+
+    total_written = 0
+    for group in groups:
+        signals.append_market_offers(group.skin.id, group.entries)
+        total_written += len(group.entries)
+
+    primary = max(groups, key=lambda g: len(g.entries))
+    input_source = _resolved_input_source(payload)
+
+    table = None
+    table_error = None
+    float_diagrams = None
+    try:
+        table = mono_trade_table.build_table(session, primary.skin, input_source=input_source)
+        float_diagrams = mono_trade_table.build_float_diagram_data(
+            session, primary.skin, input_source=input_source
+        )
+    except mono_trade_table.MonoTradeTableError as exc:
+        table_error = str(exc)
+
+    return {
+        "ok": True,
+        "skin_name": primary.skin.name,
+        "written": total_written,
+        "group_errors": errors,
+        "table": table,
+        "table_error": table_error,
+        "float_diagrams": float_diagrams,
+    }
+
+
+def handle_construct_contract_csfloat(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    """The CSfloat "Construct Contract" button's handler -- CSfloat
+    counterpart to handle_construct_contract: same payload shape as
+    handle_fetch_csfloat_offers (built from the same scrapeCsfloatPage()
+    call), writes to disk the same way, but builds the contract from
+    exactly what's in the browser window right now -- buy_now listings
+    only, same exclusion as everywhere else CSFloat input pricing is read
+    (see _validate_and_prepare_csfloat's docstring on why auctions don't
+    count) -- not whatever's already on disk.
+
+    Output pricing is untouched by any of this: offer_combos.best_combos_for_skin
+    always prices outcomes from braindamage.pricing's existing buy-order-
+    summary/last-price machinery (populated by Steam scrapes in this app, in
+    practice -- CSFloat has no buy-order-book endpoint at all, see
+    csfloat_api's module docstring), regardless of where the *input* offers
+    came from. This only ever replaces the *input* side with CSFloat's own
+    live listings -- outcome/trade prices stay exactly as they already were.
+
+    A page can resolve to more than one skin (StatTrak/Souvenir/normal mixed
+    -- see _validate_and_prepare_csfloat); each resolved group with enough
+    in-window offers gets its own best combo, and the single highest-EV one
+    across all of them wins (same "pool everything, rank globally" approach
+    as braindamage.mono_offer_combos.find_best_combos).
+    """
+    prepared = _validate_and_prepare_csfloat(session, payload)
+    if isinstance(prepared, dict):
+        return prepared
+    groups, errors = prepared
+    if not groups:
+        return {"ok": False, "error": "; ".join(errors) or "No offers to save"}
+
+    total_written = 0
+    for group in groups:
+        signals.append_market_offers(group.skin.id, group.entries)
+        total_written += len(group.entries)
+
+    best_combo: offer_combos.ComboResult | None = None
+    largest_window = 0
+    for group in groups:
+        in_window_offers = [
+            o for o in group.entries if o.float_value is not None and o.listing_type == "buy_now"
+        ]
+        largest_window = max(largest_window, len(in_window_offers))
+        if len(in_window_offers) < offer_combos.REQUIRED_INPUTS:
+            continue
+        combos = offer_combos.best_combos_for_skin(session, group.skin, in_window_offers, top_n=1)
+        if combos and (best_combo is None or combos[0].expected_value > best_combo.expected_value):
+            best_combo = combos[0]
+
+    if best_combo is None:
+        if largest_window < offer_combos.REQUIRED_INPUTS:
+            return {
+                "ok": False,
+                "error": (
+                    f"Only {largest_window} buy-now listing(s) with a visible float are on this page right "
+                    f"now -- need at least {offer_combos.REQUIRED_INPUTS} to construct a mono trade-up contract."
+                ),
+            }
+        return {
+            "ok": False,
+            "error": (
+                "None of the skin(s) on this page are usable mono trade-up inputs right now -- wrong "
+                "category, no next rarity tier, or their collection has no eligible output at that rarity."
+            ),
+        }
+
+    signals.append_contract_history(
+        best_combo.input_skin.id,
+        [
+            signals.ContractHistorySignal(
+                expected_value=best_combo.expected_value,
+                raw_avg_float=best_combo.raw_avg_float,
+                generated_at=signals.now_utc(),
+            )
+        ],
+    )
+
+    return {
+        "ok": True,
+        "skin_name": best_combo.input_skin.name,
+        "written": total_written,
+        "group_errors": errors,
+        "contract": _serialize_combo(best_combo),
+        "contract_history": _recent_contract_history(best_combo.input_skin.id),
+    }
+
+
 def handle_random_skin(session: Session, _payload: dict[str, Any]) -> dict[str, Any]:
     """Picks a uniformly random weapon skin from the local catalog DB, for
     webext/sidebar.js's Random Fetch button. Deliberately never calls out to
@@ -368,13 +668,17 @@ def handle_random_skin(session: Session, _payload: dict[str, Any]) -> dict[str, 
 
 
 def handle_overview_chunk(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
-    """Build one independently measurable rarity/StatTrak overview batch."""
+    """Build one independently measurable rarity/StatTrak overview batch,
+    with input prices from payload["input_source"] (default "steam" -- see
+    mono_trade_table.INPUT_SOURCES), the sidebar's market dropdown's
+    persisted value (webext/overview.js reads it from browser.storage.local,
+    since this runs in its own tab with no dropdown of its own)."""
     rarity = payload.get("rarity_name")
     stattrak = payload.get("stattrak")
     if rarity not in mono_trade_overview.tradeup.INPUT_RARITIES or not isinstance(stattrak, bool):
         return {"ok": False, "error": "Invalid overview batch"}
     return mono_trade_overview.build_overview(
-        session, rarities=[rarity], stattrak_values=[stattrak]
+        session, rarities=[rarity], stattrak_values=[stattrak], input_source=_resolved_input_source(payload)
     )
 
 
@@ -383,10 +687,17 @@ def handle_overview_chunk(session: Session, payload: dict[str, Any]) -> dict[str
 # field existed) is the always-on scrape+table refresh; "construct_contract"
 # is the "Construct Contract" button. Both share the exact same payload
 # shape and disk-write behavior, differing only in what they compute after.
+# "fetch_csfloat_offers"/"construct_contract_csfloat" are fetch_offers'/
+# construct_contract's CSFloat counterparts -- see handle_fetch_csfloat_offers
+# and handle_construct_contract_csfloat.
 _HANDLERS = {
     "fetch_offers": handle_fetch_offers,
+    "fetch_csfloat_offers": handle_fetch_csfloat_offers,
     "construct_contract": handle_construct_contract,
-    "overview": lambda session, _payload: mono_trade_overview.build_overview(session),
+    "construct_contract_csfloat": handle_construct_contract_csfloat,
+    "overview": lambda session, payload: mono_trade_overview.build_overview(
+        session, input_source=_resolved_input_source(payload)
+    ),
     "overview_chunk": handle_overview_chunk,
     "random_skin": handle_random_skin,
 }

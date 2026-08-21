@@ -297,6 +297,27 @@ class TestBuildFloatDiagramData:
 
         assert data["outcomes"][0]["net_price_by_wear"] == {"Field-Tested": steam_fees.net_proceeds(50.0)}
 
+    def test_outcome_net_price_by_wear_prefers_buy_order_same_as_the_table_cell(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        signals.append_price_observations(
+            "out-a",
+            [signals.PriceObservationSignal(source="test", wear_name="Field-Tested", price=50.0, fetched_at=now_utc())],
+        )
+        signals.append_buy_order_summaries(
+            "out-a",
+            [
+                signals.BuyOrderSummarySignal(
+                    market_hash_name="Output A (Field-Tested)", wear_name="Field-Tested",
+                    price=80.0, num_orders=10, fetched_at=now_utc(),
+                )
+            ],
+        )
+
+        data = mono_trade_table.build_float_diagram_data(session, skin)
+
+        assert data["outcomes"][0]["net_price_by_wear"] == {"Field-Tested": steam_fees.net_proceeds(80.0)}
+
     def test_offer_points_are_grouped_into_batches_ranked_newest_first(self, session):
         skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
         _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
@@ -354,6 +375,134 @@ class TestBuildFloatDiagramData:
         assert len(data["offer_points"]) == mono_trade_table.FLOAT_DIAGRAM_MAX_BATCHES
         ranks = sorted(p["batch_rank"] for p in data["offer_points"])
         assert ranks == list(range(mono_trade_table.FLOAT_DIAGRAM_MAX_BATCHES))
+
+
+def _csfloat_offers(skin_id: str, wear_name: str, prices: list[float], *, fetched_at=None) -> None:
+    fetched_at = fetched_at or now_utc()
+    signals.append_market_offers(
+        skin_id,
+        [
+            signals.MarketOfferSignal(
+                source="csfloat",
+                listing_id=f"listing-{wear_name}-{i}",
+                market_hash_name=f"Skin ({wear_name})",
+                wear_name=wear_name,
+                float_value=0.02 + i * 0.001,
+                price=price,
+                listing_type="buy_now",
+                fetched_at=fetched_at,
+            )
+            for i, price in enumerate(prices)
+        ],
+    )
+
+
+class TestInputSourceCsfloat:
+    def test_build_table_defaults_to_steam_offers(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        _offers("in-a", "Field-Tested", [1.0] * 10)
+        _csfloat_offers("in-a", "Field-Tested", [5.0] * 10)
+
+        table = mono_trade_table.build_table(session, skin)
+
+        row = next(r for r in table["rows"] if r["wear_name"] == "Field-Tested")
+        assert row["input_cell"]["value"] == pytest.approx(10.0)
+
+    def test_build_table_reads_csfloat_offers_when_selected(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        _offers("in-a", "Field-Tested", [1.0] * 10)
+        _csfloat_offers("in-a", "Field-Tested", [5.0] * 10)
+
+        table = mono_trade_table.build_table(session, skin, input_source="csfloat")
+
+        row = next(r for r in table["rows"] if r["wear_name"] == "Field-Tested")
+        assert row["input_cell"]["value"] == pytest.approx(50.0)
+
+    def test_build_table_csfloat_dedups_by_listing_id_not_float_pattern(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        # Re-scraping the same 10 listings twice must still count as 10, same
+        # dedup guarantee as Steam's own offers (test_dedups_offers_by_float_
+        # pattern_price_keeping_latest above), but keyed off listing_id here.
+        _csfloat_offers("in-a", "Field-Tested", list(range(1, 11)))
+        _csfloat_offers("in-a", "Field-Tested", list(range(1, 11)))
+
+        table = mono_trade_table.build_table(session, skin, input_source="csfloat")
+
+        row = next(r for r in table["rows"] if r["wear_name"] == "Field-Tested")
+        assert row["input_cell"]["value"] == pytest.approx(sum(range(1, 11)))
+
+    def test_build_table_input_cell_none_with_fewer_than_ten_csfloat_offers(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        _csfloat_offers("in-a", "Field-Tested", [1.0] * 9)
+
+        table = mono_trade_table.build_table(session, skin, input_source="csfloat")
+
+        row = next(r for r in table["rows"] if r["wear_name"] == "Field-Tested")
+        assert row["input_cell"] == {"value": None, "color": None}
+
+    def test_build_table_excludes_csfloat_auction_listings(self, session):
+        # An auction's displayed price is only its current bid, not a price
+        # actually payable right now -- must not count toward the buy-10 cost.
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        _csfloat_offers("in-a", "Field-Tested", [1.0] * 10)
+        signals.append_market_offers(
+            "in-a",
+            [
+                signals.MarketOfferSignal(
+                    source="csfloat",
+                    listing_id="auction-1",
+                    market_hash_name="Skin (Field-Tested)",
+                    wear_name="Field-Tested",
+                    float_value=0.5,
+                    price=0.01,  # would win cheapest-10 if wrongly included
+                    listing_type="auction",
+                    fetched_at=now_utc(),
+                )
+            ],
+        )
+
+        table = mono_trade_table.build_table(session, skin, input_source="csfloat")
+
+        row = next(r for r in table["rows"] if r["wear_name"] == "Field-Tested")
+        assert row["input_cell"]["value"] == pytest.approx(10.0)
+
+    def test_build_float_diagram_data_reads_csfloat_offers_when_selected(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        _offers("in-a", "Field-Tested", [1.0])
+        _csfloat_offers("in-a", "Field-Tested", [9.0])
+
+        data = mono_trade_table.build_float_diagram_data(session, skin, input_source="csfloat")
+
+        assert [p["price"] for p in data["offer_points"]] == [9.0]
+
+    def test_build_float_diagram_data_excludes_csfloat_auction_listings(self, session):
+        skin = _make_skin(session, id="in-a", name="Input A", rarity_name="Mil-Spec Grade")
+        _make_skin(session, id="out-a", name="Output A", rarity_name="Restricted")
+        signals.append_market_offers(
+            "in-a",
+            [
+                signals.MarketOfferSignal(
+                    source="csfloat", listing_id="buy-1", market_hash_name="Skin (Field-Tested)",
+                    wear_name="Field-Tested", float_value=0.2, price=9.0, listing_type="buy_now",
+                    fetched_at=now_utc(),
+                ),
+                signals.MarketOfferSignal(
+                    source="csfloat", listing_id="auction-1", market_hash_name="Skin (Field-Tested)",
+                    wear_name="Field-Tested", float_value=0.3, price=0.01, listing_type="auction",
+                    fetched_at=now_utc(),
+                ),
+            ],
+        )
+
+        data = mono_trade_table.build_float_diagram_data(session, skin, input_source="csfloat")
+
+        assert [p["price"] for p in data["offer_points"]] == [9.0]
 
 
 class TestSteamListingUrl:

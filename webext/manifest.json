@@ -16,7 +16,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://steamcommunity.com/market/listings/*"],
+      "matches": ["*://steamcommunity.com/market/listings/*", "*://*.csfloat.com/*"],
       "js": [
         "vendor/vue.runtime.global.prod.js",
         "vendor/chart.umd.min.js",
@@ -30,5 +30,5 @@
     }
   ],
   "permissions": ["nativeMessaging", "storage"],
-  "host_permissions": ["*://steamcommunity.com/market/listings/*"]
+  "host_permissions": ["*://steamcommunity.com/market/listings/*", "*://*.csfloat.com/*"]
 }
