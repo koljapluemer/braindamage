@@ -404,6 +404,14 @@ class TestHandleConstructContract:
         assert reply["ok"] is False
         assert "Unknown action" in reply["error"]
 
+    def test_skins_overview_action_dispatches_to_skins_overview_module(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+
+        reply = steam_offers_host.handle_message(session, {"action": "skins_overview"})
+
+        assert reply["ok"] is True
+        assert reply["collections"][0]["rarities"][0]["skins"][0]["skin_name"] == "Input A"
+
 
 def _csfloat_payload(**overrides) -> dict:
     base = {

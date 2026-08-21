@@ -27,7 +27,7 @@ from typing import Any, BinaryIO
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import config, mono_trade_overview, mono_trade_table, offer_combos, signals
+from . import config, mono_trade_overview, mono_trade_table, offer_combos, signals, skins_overview
 from .db import SessionLocal, upgrade_database
 from .market_names import market_hash_name, parse_market_hash_name
 from .models import Skin
@@ -709,6 +709,7 @@ _HANDLERS = {
     ),
     "overview_chunk": handle_overview_chunk,
     "random_skin": handle_random_skin,
+    "skins_overview": lambda session, _payload: skins_overview.build_skins_overview(session),
 }
 
 

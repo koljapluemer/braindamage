@@ -1460,6 +1460,7 @@
         isCsfloatHost: IS_CSFLOAT_HOST,
         inputSource,
         openOverview: () => browser.runtime.sendMessage({ type: "openOverview" }),
+        openSkinsOverview: () => browser.runtime.sendMessage({ type: "openSkinsOverview" }),
         toggleSidebar: () => sidebar.send("toggle"),
         randomFetch,
         randomFetchWear,

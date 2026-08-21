@@ -11,12 +11,17 @@ const RELAYED_MESSAGE_TYPES = [
   "constructContract",
   "constructCsfloatContract",
   "fetchOverview",
+  "fetchSkinsOverview",
   "randomSkin",
 ];
 
 browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.type === "openOverview") {
     browser.tabs.create({ url: browser.runtime.getURL("overview.html") });
+    return undefined;
+  }
+  if (message && message.type === "openSkinsOverview") {
+    browser.tabs.create({ url: browser.runtime.getURL("skins.html") });
     return undefined;
   }
   if (!message || !RELAYED_MESSAGE_TYPES.includes(message.type)) return undefined;

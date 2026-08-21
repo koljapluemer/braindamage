@@ -40,6 +40,7 @@
             <option value="csfloat">CSfloat</option>
           </select>
           <button type="button" :class="btnClass" @click="openOverview">Overview</button>
+          <button type="button" :class="btnClass" @click="openSkinsOverview">Skins</button>
           <button type="button" :class="btnClass" :disabled="fetchFsm.is('loading') || autoScrollFsm.is('running')" @click="refresh">Refresh</button>
           <button type="button" :class="btnClass" :disabled="contractFsm.is('loading') || autoScrollFsm.is('running')" @click="construct"
                   title="Run the buy combo search on just what's visible on this page right now">
