@@ -79,6 +79,14 @@ class MarketOfferSignal(BaseModel):
     currency: str = "USD"
     listing_type: str
     fetched_at: datetime
+    # True for a batch written by the sidebar's "Auto-Scroll & Save" flow
+    # (webext/sidebar.js) on CSfloat -- see SteamOfferSignal.comprehensive
+    # for the Steam-side counterpart and the full rationale. CSfloat has no
+    # on-page results counter to aim for (unlike Steam's "Found N results"),
+    # so its Auto-Scroll & Save just scrolls until a scroll count/stall
+    # tripwire fires; this flag doesn't promise every listing was captured,
+    # only that the scrape went past a single ~load's worth of cards.
+    comprehensive: bool = False
     raw: dict[str, Any] = Field(default_factory=dict)
 
 

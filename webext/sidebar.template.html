@@ -50,9 +50,11 @@
                   title="Continuously cycle random skins through every wear level, fetching offers for each">
             Random Fetch
           </button>
-          <button v-if="!isCsfloatHost" type="button" :class="btnClass" @click="startAutoScrollAndSave"
+          <button type="button" :class="btnClass" @click="startAutoScrollAndSave"
                   :disabled="autoScrollFsm.is('running') || randomFetch.active"
-                  title="Scroll to the bottom repeatedly to load every offer on this page (up to 1000), then save the full batch as a comprehensive snapshot">
+                  :title="isCsfloatHost
+                    ? 'Scroll to the bottom repeatedly (up to 50 tries) to load more offers on this page, then save the full batch as a comprehensive snapshot'
+                    : 'Scroll to the bottom repeatedly to load every offer on this page (up to 1000), then save the full batch as a comprehensive snapshot'">
             Auto-Scroll &amp; Save
           </button>
           <button type="button" :class="btnClass" title="Collapse" @click="toggleSidebar">&raquo;</button>
@@ -218,6 +220,6 @@
         <button type="button"
                 class="bg-[#8b2f2f] text-white border border-white/25 rounded-sm px-3 py-1.5 text-[12px] cursor-pointer hover:bg-[#a83a3a] shadow-[0_2px_8px_rgba(0,0,0,0.5)]"
                 @click="stopAutoScrollAndSave">
-          Stop Auto-Scroll &amp; Save ({{ autoScrollProgress.loaded }}/{{ autoScrollProgress.target }})
+          Stop Auto-Scroll &amp; Save ({{ autoScrollProgress.target === null ? autoScrollProgress.loaded + ' loaded' : autoScrollProgress.loaded + '/' + autoScrollProgress.target }})
         </button>
       </div>

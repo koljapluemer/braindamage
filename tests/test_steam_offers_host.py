@@ -447,6 +447,22 @@ class TestHandleFetchCsfloatOffers:
         assert written[0].listing_type == "buy_now"
         assert written[0].raw["pattern_seed"] == 7
 
+    def test_comprehensive_flag_is_stamped_onto_written_offers(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+
+        steam_offers_host.handle_message(session, _csfloat_payload(comprehensive=True))
+
+        written = signals.read_market_offers("in-a")
+        assert written[0].comprehensive is True
+
+    def test_comprehensive_flag_defaults_to_false(self, session):
+        _make_skin(session, id="in-a", name="Input A")
+
+        steam_offers_host.handle_message(session, _csfloat_payload())
+
+        written = signals.read_market_offers("in-a")
+        assert written[0].comprehensive is False
+
     def test_offers_are_grouped_by_stattrak_souvenir_into_separate_skins(self, session):
         _make_skin(session, id="normal", name="Input A", stattrak=False, souvenir=False)
         _make_skin(session, id="st", name="Input A", stattrak=True, souvenir=False)

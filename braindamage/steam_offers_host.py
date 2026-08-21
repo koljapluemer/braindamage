@@ -453,6 +453,7 @@ def _validate_and_prepare_csfloat(
     # _validate_and_prepare's identical rationale (mono_trade_table groups
     # offers into "batches" by exact fetched_at equality).
     fetched_at = signals.now_utc()
+    comprehensive = bool(payload.get("comprehensive"))
     groups: list[_CsfloatGroup] = []
     errors: list[str] = []
 
@@ -489,6 +490,7 @@ def _validate_and_prepare_csfloat(
                     currency="USD",
                     listing_type=offer.get("listing_type") or "buy_now",
                     fetched_at=fetched_at,
+                    comprehensive=comprehensive,
                     raw=raw,
                 )
             )
@@ -508,7 +510,14 @@ def handle_fetch_csfloat_offers(session: Session, payload: dict[str, Any]) -> di
                      "pattern_seed": int | None, "price": float,
                      "stattrak": bool, "souvenir": bool,
                      "listing_id": str, "listing_type": str}, ...],
-         "input_source": "steam" | "csfloat" | None}
+         "input_source": "steam" | "csfloat" | None,
+         "comprehensive": bool | None}
+
+    comprehensive (default False) is set by the sidebar's "Auto-Scroll &
+    Save" flow -- see SteamOfferSignal.comprehensive / MarketOfferSignal.comprehensive
+    for what it means on each side; stamped onto every MarketOfferSignal
+    written here the same way handle_fetch_offers stamps it onto
+    SteamOfferSignal.
 
     base_skin_name has no wear/StatTrak/Souvenir baked in (unlike Steam's
     market_hash_name) -- CSFloat's item-name element never renders those

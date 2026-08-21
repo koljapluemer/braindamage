@@ -374,6 +374,36 @@
     return { base_skin_name: baseSkinName, currency, offers };
   }
 
+  // CSfloat counterpart to waitForMoreOffers below (same MutationObserver-
+  // over-a-fixed-timeout shape, same reasoning) -- used by "Auto-Scroll &
+  // Save" on a CSfloat page, which unlike Steam has no "Found N results"
+  // counter to aim for, so it just needs to know "did that scroll load
+  // anything new" until it stalls or hits its round cap (see startAutoScrollAndSaveCsfloat).
+  function waitForMoreCsfloatOffers(previousCount, timeoutMs) {
+    const check = () => {
+      const count = scrapeCsfloatPage().offers.length;
+      return count > previousCount ? count : null;
+    };
+
+    const already = check();
+    if (already !== null) return Promise.resolve(already);
+
+    return new Promise((resolve) => {
+      const observer = new MutationObserver(() => {
+        const result = check();
+        if (result === null) return;
+        observer.disconnect();
+        clearTimeout(timer);
+        resolve(result);
+      });
+      const timer = setTimeout(() => {
+        observer.disconnect();
+        resolve(null);
+      }, timeoutMs);
+      observer.observe(document.body, { childList: true, subtree: true });
+    });
+  }
+
   // Resolves as soon as `wearName`'s own listings have actually rendered
   // after a filter click -- either real offer cards for that wear, or
   // Steam's own "No Listings Found" empty state, whichever the page
@@ -791,8 +821,9 @@
       // handle_fetch_csfloat_offers' reply shape instead. No
       // contractHistory update: "Construct Contract" (trade-*outcome*
       // combos) stays Steam-only for now, so this leaves whatever
-      // contractHistory already held untouched.
-      async function runCsfloatFetchAndRender(scraped) {
+      // contractHistory already held untouched. `extra` mirrors
+      // runFetchAndRender's own param -- see there.
+      async function runCsfloatFetchAndRender(scraped, extra) {
         fetchFsm.send("start");
         if (!scraped.offers.length) {
           fetchStatus.value = "No item cards found on this page yet -- try Refresh once it's finished loading.";
@@ -808,13 +839,18 @@
         fetchStatus.value = "Working...";
         let reply;
         try {
-          reply = await sendCsfloatScrapeToHost({
-            action: "fetch_csfloat_offers",
-            base_skin_name: scraped.base_skin_name,
-            currency: scraped.currency,
-            input_source: inputSource.value,
-            offers: scraped.offers,
-          });
+          reply = await sendCsfloatScrapeToHost(
+            Object.assign(
+              {
+                action: "fetch_csfloat_offers",
+                base_skin_name: scraped.base_skin_name,
+                currency: scraped.currency,
+                input_source: inputSource.value,
+                offers: scraped.offers,
+              },
+              extra || {}
+            )
+          );
         } catch (e) {
           fetchStatus.value =
             "Could not reach the native host: " + e.message + "\n(is it installed? see scripts/install_native_host.sh)";
@@ -1042,23 +1078,32 @@
       }
 
       // -- "Auto-Scroll & Save": repeatedly scrolls THIS page (no navigation,
-      // unlike Random Fetch above) to the bottom to trigger Steam's own
+      // unlike Random Fetch above) to the bottom to trigger the site's own
       // infinite-scroll loading, waits for the new cards to actually render,
-      // and repeats -- until either every offer Steam reports via
-      // findResultsCount() is loaded (capped at AUTO_SCROLL_MAX_OFFERS, since
-      // a wildly popular skin's "Found N results" can run into the tens of
-      // thousands and this app has no use for more than the cheapest ~1000),
-      // a stall/round/time tripwire fires, or the user hits Stop. Whatever
-      // ended up loaded is saved either way (see the loop's tail below),
+      // and repeats until either it's loaded everything there is to load, a
+      // stall/round/time tripwire fires, or the user hits Stop. Whatever
+      // ended up loaded is saved either way (see each loop's tail below),
       // stamped `comprehensive: true` so steam_offers_host records it as a
       // near-complete snapshot rather than an ordinary single-page scrape --
-      // see SteamOfferSignal.comprehensive. Steam-only for now: CSfloat's
-      // own infinite scroll isn't wired up here.
-      const AUTO_SCROLL_MAX_OFFERS = 1000;
-      const AUTO_SCROLL_MAX_ROUNDS = 400; // hard cap regardless of growth -- 1000 offers / ~20 per round, with margin
-      const AUTO_SCROLL_MAX_STALL_ROUNDS = 4; // consecutive no-growth scrolls before giving up
-      const AUTO_SCROLL_GROWTH_TIMEOUT_MS = 10000; // per-scroll wait for new cards to render
-      const AUTO_SCROLL_MAX_DURATION_MS = 10 * 60 * 1000; // absolute wall-clock abort
+      // see SteamOfferSignal.comprehensive / MarketOfferSignal.comprehensive.
+      //
+      // Steam and CSfloat need genuinely different stop conditions, hence
+      // two separate loops (startAutoScrollAndSaveSteam/-Csfloat below)
+      // sharing just the FSM/progress state and the Stop button:
+      //   - Steam renders a "Found N results" count up front (findResultsCount),
+      //     so its loop has a real target to aim for and can tell "done"
+      //     (loaded >= target) apart from "gave up" (a tripwire fired).
+      //   - CSfloat renders no such count, so its loop has no target at all
+      //     -- it just scrolls up to AUTO_SCROLL_CSFLOAT_MAX_ROUNDS times and
+      //     stops early on a stall, per the user's own instructions for this
+      //     site. There's no "done" state to report here, only "stopped".
+      const AUTO_SCROLL_MAX_OFFERS = 1000; // Steam only -- see startAutoScrollAndSaveSteam
+      const AUTO_SCROLL_MAX_ROUNDS = 400; // Steam only -- hard cap regardless of growth (1000 offers / ~20 per round, with margin)
+      const AUTO_SCROLL_MAX_STALL_ROUNDS = 4; // Steam only -- consecutive no-growth scrolls before giving up
+      const AUTO_SCROLL_CSFLOAT_MAX_ROUNDS = 50; // CSfloat has no results count to aim for -- a flat scroll-attempt cap instead
+      const AUTO_SCROLL_CSFLOAT_MAX_STALL_ROUNDS = 3;
+      const AUTO_SCROLL_GROWTH_TIMEOUT_MS = 10000; // per-scroll wait for new cards to render, both sites
+      const AUTO_SCROLL_MAX_DURATION_MS = 10 * 60 * 1000; // absolute wall-clock abort, both sites
 
       const autoScrollFsm = createMachine(
         "autoScroll",
@@ -1068,6 +1113,9 @@
         },
         "idle"
       );
+      // `target` is the known cap on Steam, null on CSfloat (see the block
+      // comment above) -- the template shows "loaded/target" when it's a
+      // number and just "loaded" when it's null.
       const autoScrollProgress = ref({ loaded: 0, target: 0 });
       // Plain closure flag, not a ref -- only ever read from inside the loop
       // below (same reasoning as randomFetchWear not needing to survive a
@@ -1079,7 +1127,11 @@
         autoScrollCancelRequested = true;
       }
 
-      async function startAutoScrollAndSave() {
+      function startAutoScrollAndSave() {
+        return IS_CSFLOAT_HOST ? startAutoScrollAndSaveCsfloat() : startAutoScrollAndSaveSteam();
+      }
+
+      async function startAutoScrollAndSaveSteam() {
         if (IS_CSFLOAT_HOST || autoScrollFsm.is("running") || randomFetch.value.active) return;
 
         autoScrollFsm.send("start");
@@ -1159,6 +1211,71 @@
         fetchStatus.value += abortReason
           ? `\n(comprehensive snapshot, incomplete: ${abortReason})`
           : "\n(comprehensive snapshot, complete)";
+
+        autoScrollFsm.send("finish");
+      }
+
+      // CSfloat counterpart to startAutoScrollAndSaveSteam above -- no
+      // results count to aim for (see the block comment up top), so this
+      // just scrolls up to AUTO_SCROLL_CSFLOAT_MAX_ROUNDS times, stopping
+      // early the moment a scroll stops turning up new cards.
+      async function startAutoScrollAndSaveCsfloat() {
+        if (!IS_CSFLOAT_HOST || autoScrollFsm.is("running")) return;
+
+        autoScrollFsm.send("start");
+        autoScrollCancelRequested = false;
+        const startedAt = Date.now();
+
+        autoScrollProgress.value = { loaded: scrapeCsfloatPage().offers.length, target: null };
+
+        let stallRounds = 0;
+        let abortReason = null;
+
+        for (let round = 0; round < AUTO_SCROLL_CSFLOAT_MAX_ROUNDS; round++) {
+          if (autoScrollCancelRequested) {
+            abortReason = "stopped by user";
+            break;
+          }
+          if (Date.now() - startedAt > AUTO_SCROLL_MAX_DURATION_MS) {
+            abortReason = "exceeded the time limit";
+            break;
+          }
+
+          fetchStatus.value =
+            `Auto-Scroll & Save: ${autoScrollProgress.value.loaded} loaded -- scrolling ` +
+            `(${round + 1}/${AUTO_SCROLL_CSFLOAT_MAX_ROUNDS})...`;
+          scrollListingsToBottom();
+          const grown = await waitForMoreCsfloatOffers(autoScrollProgress.value.loaded, AUTO_SCROLL_GROWTH_TIMEOUT_MS);
+
+          if (autoScrollCancelRequested) {
+            abortReason = "stopped by user";
+            break;
+          }
+
+          if (grown === null) {
+            stallRounds++;
+            if (stallRounds >= AUTO_SCROLL_CSFLOAT_MAX_STALL_ROUNDS) {
+              abortReason = "no new listings loaded after several scrolls (likely reached the end)";
+              break;
+            }
+            continue;
+          }
+          stallRounds = 0;
+          autoScrollProgress.value = { loaded: grown, target: null };
+        }
+
+        // Unlike Steam, there's no known target here, so reaching the round
+        // cap without a stall is still just "ran out of attempts" -- never a
+        // confirmed "loaded everything" the way Steam's loop can report.
+        if (!abortReason) {
+          abortReason = `hit the ${AUTO_SCROLL_CSFLOAT_MAX_ROUNDS}-scroll limit`;
+        }
+
+        const loaded = autoScrollProgress.value.loaded;
+        fetchStatus.value = `Auto-Scroll & Save: stopped (${abortReason}) with ${loaded} listing(s) loaded -- saving now...`;
+
+        await runCsfloatFetchAndRender(scrapeCsfloatPage(), { comprehensive: true });
+        fetchStatus.value += `\n(comprehensive snapshot -- stopped: ${abortReason})`;
 
         autoScrollFsm.send("finish");
       }

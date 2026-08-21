@@ -14,7 +14,7 @@ window.__bdSidebarRender = (function () {
   const _hoisted_6 = ["disabled", "onClick"]
   const _hoisted_7 = ["disabled", "onClick"]
   const _hoisted_8 = ["onClick", "disabled"]
-  const _hoisted_9 = ["onClick", "disabled"]
+  const _hoisted_9 = ["onClick", "disabled", "title"]
   const _hoisted_10 = ["onClick"]
   const _hoisted_11 = {
     key: 0,
@@ -116,16 +116,15 @@ window.__bdSidebarRender = (function () {
                   title: "Continuously cycle random skins through every wear level, fetching offers for each"
                 }, " Random Fetch ", 10 /* CLASS, PROPS */, _hoisted_8))
               : _createCommentVNode("v-if", true),
-            (!isCsfloatHost)
-              ? (_openBlock(), _createElementBlock("button", {
-                  key: 1,
-                  type: "button",
-                  class: _normalizeClass(btnClass),
-                  onClick: startAutoScrollAndSave,
-                  disabled: autoScrollFsm.is('running') || randomFetch.active,
-                  title: "Scroll to the bottom repeatedly to load every offer on this page (up to 1000), then save the full batch as a comprehensive snapshot"
-                }, " Auto-Scroll & Save ", 10 /* CLASS, PROPS */, _hoisted_9))
-              : _createCommentVNode("v-if", true),
+            _createElementVNode("button", {
+              type: "button",
+              class: _normalizeClass(btnClass),
+              onClick: startAutoScrollAndSave,
+              disabled: autoScrollFsm.is('running') || randomFetch.active,
+              title: isCsfloatHost
+                      ? 'Scroll to the bottom repeatedly (up to 50 tries) to load more offers on this page, then save the full batch as a comprehensive snapshot'
+                      : 'Scroll to the bottom repeatedly to load every offer on this page (up to 1000), then save the full batch as a comprehensive snapshot'
+            }, " Auto-Scroll & Save ", 10 /* CLASS, PROPS */, _hoisted_9),
             _createElementVNode("button", {
               type: "button",
               class: _normalizeClass(btnClass),
@@ -388,7 +387,7 @@ window.__bdSidebarRender = (function () {
                 type: "button",
                 class: "bg-[#8b2f2f] text-white border border-white/25 rounded-sm px-3 py-1.5 text-[12px] cursor-pointer hover:bg-[#a83a3a] shadow-[0_2px_8px_rgba(0,0,0,0.5)]",
                 onClick: stopAutoScrollAndSave
-              }, " Stop Auto-Scroll & Save (" + _toDisplayString(autoScrollProgress.loaded) + "/" + _toDisplayString(autoScrollProgress.target) + ") ", 9 /* TEXT, PROPS */, _hoisted_40)
+              }, " Stop Auto-Scroll & Save (" + _toDisplayString(autoScrollProgress.target === null ? autoScrollProgress.loaded + ' loaded' : autoScrollProgress.loaded + '/' + autoScrollProgress.target) + ") ", 9 /* TEXT, PROPS */, _hoisted_40)
             ]))
           : _createCommentVNode("v-if", true)
       ], 64 /* STABLE_FRAGMENT */))
